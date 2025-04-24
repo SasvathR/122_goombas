@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import j0
+
+class Vehicle:
+    """
+    Represents a vehicle in 2D space with constant velocity.
+
+    Attributes:
+        id (str): Unique identifier for the vehicle.
+        position (np.ndarray): Current [x, y] position in meters.
+        velocity (np.ndarray): Current [vx, vy] velocity in m/s.
+        freq (float): Carrier frequency in Hz (for Doppler calculations).
+        c (float): Speed of light in m/s.
+        last_update (float): Last time (s) the position was updated.
+    """
+    def __init__(self, id, x, y, vx, vy, freq=5.9e9, c=3e8):
+        self.id = id
+        self.position = np.array([x, y], dtype=float)
+        self.velocity = np.array([vx, vy], dtype=float)
+        self.freq = freq
+        self.c = c
+        self.last_update = 0.0
+        self.history = []
+        self.stopped_time = 0.0
+        self.is_stopped = False
+        self.current_stop_duration = 0.0
+        self.stop_segments = []  # Track individual stop periods
+
+    def move_to(self, t):
+        dt = t - self.last_update
+        if dt <= 0:
+            return
+
+        speed = np.linalg.norm(self.velocity)
+        stopped_threshold = 0.1
+        
+        # Update stop state tracking
+        if speed < stopped_threshold and not self.is_stopped:
+            # Start new stop period
+            self.is_stopped = True
+            self.current_stop_duration = 0.0
+            self.stop_segments.append({'start': t, 'end': None})
+        elif speed >= stopped_threshold and self.is_stopped:
+            # End current stop period
+            self.is_stopped = False
+            if self.stop_segments:
+                self.stop_segments[-1]['end'] = t
+                self.stopped_time += self.current_stop_duration
+                self.current_stop_duration = 0.0
+
+        # Accumulate time for current stop
+        if self.is_stopped:
+            self.current_stop_duration += dt
+            if self.stop_segments:
+                self.stop_segments[-1]['end'] = t  # Update ongoing stop
+
+        # Update position history before moving
+        self.history.append((t, self.position.copy()))
+        self.position += self.velocity * dt
+        self.last_update = t
+
+    def doppler_shift(self, transmitter):
+        """
+        Compute the Doppler shift (Hz) observed at this vehicle (receiver)
+        for a transmission from 'transmitter'.
+
+        Uses:
+            v_rel = (v_tx - v_rx) ⋅ (p_rx - p_tx) / |p_rx - p_tx|
+            f_D = (v_rel / c) * f_c
+
+        Args:
+            transmitter (Vehicle): The transmitting vehicle.
+        Returns:
+            float: Doppler frequency shift in Hz.
+        """
+        # Vector from transmitter to receiver
+        disp = self.position - transmitter.position
+        dist = np.linalg.norm(disp)
+        if dist == 0:
+            return 0.0
+        direction = disp / dist
+        # Relative velocity (projected)
+        rel_vel = np.dot(transmitter.velocity - self.velocity, direction)
+        return (rel_vel / self.c) * self.freq
+
+    def __repr__(self):
+        return (f"Vehicle(id={self.id}, pos={self.position.tolist()}, "
+                f"vel={self.velocity.tolist()})")
+
+
+class ChannelFading:
+    """
+    Time-coherent Rayleigh fading process using Jakes' model autocorrelation.
+
+    Attributes:
+        f_max (float): Maximum Doppler frequency (Hz).
+        last_time (float): Last timestamp the channel was evolved to.
+        h (complex): Current complex channel gain.
+    """
+    def __init__(self, f_max, init_time=0.0):
+        self.f_max = abs(f_max)
+        self.last_time = init_time
+        # Initialize channel gain as a random complex Gaussian (Rayleigh)
+        real = np.random.randn()
+        imag = np.random.randn()
+        self.h = (real + 1j*imag) / np.sqrt(2)
+
+    def evolve_to(self, t):
+        """
+        Evolve channel gain from last_time to t, preserving time correlation.
+
+        Uses the theoretical autocorrelation:
+            ρ(Δt) = J0(2π f_max Δt)
+        and updates via:
+            h_new = ρ h_old + √(1−ρ²)·η, η~CN(0,1)
+
+        Args:
+            t (float): Current simulation time in seconds.
+        Returns:
+            complex: Updated channel gain at time t.
+        """
+        dt = t - self.last_time
+        if dt < 0:
+            # If user queries past time, return existing state
+            return self.h
+        # Compute Bessel-based autocorrelation
+        rho = j0(2 * np.pi * self.f_max * dt)
+        # Generate new independent complex Gaussian sample
+        eta = (np.random.randn() + 1j*np.random.randn()) / np.sqrt(2)
+        # Update channel with correct correlation
+        self.h = rho * self.h + np.sqrt(1 - rho**2) * eta
+        self.last_time = t
+        return self.h
+
+
+
+def plot_vehicles_old(vehicles, time=None, xlim=(-10, 100), ylim=(-10, 100)):
+    """
+    Plot all vehicles in 2D with velocity arrows.
+
+    Args:
+        vehicles (list[Vehicle]): Vehicles to plot.
+        time (float, optional): Simulation time (for title).
+        xlim (tuple): X-axis limits.
+        ylim (tuple): Y-axis limits.
+    """
+    plt.figure(figsize=(6,6))
+    for v in vehicles:
+        plt.scatter(v.position[0], v.position[1], label=v.id)
+        plt.arrow(
+            v.position[0], v.position[1],
+            v.velocity[0], v.velocity[1],
+            head_width=0.5, head_length=1.0,
+            fc='blue', ec='blue', alpha=0.6
+        )
+    title = "Vehicle Positions and Velocities"
+    if time is not None:
+        title += f" at t={time:.2f}s"
+    plt.title(title)
+    plt.xlabel("X Position (m)")
+    plt.ylabel("Y Position (m)")
+    plt.xlim(*xlim)
+    plt.ylim(*ylim)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+def plot_vehicles_enriched(vehicles, time=None):
+    plt.figure(figsize=(12, 12))
+    ax = plt.gca()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(vehicles)))
+    
+    for idx, v in enumerate(vehicles):
+        # Plot trajectory with color intensity showing speed history
+        if v.history:
+            times, positions = zip(*v.history)
+            speeds = [np.linalg.norm(v.velocity) for _ in positions]
+            ax.scatter(*zip(*positions), c=speeds, cmap='viridis', 
+                      alpha=0.6, s=10, label=f'{v.id} Speed Heatmap')
+
+        # Current position and velocity
+        current_pos = v.position
+        speed = np.linalg.norm(v.velocity)
+        
+        # Vehicle marker with stop indicators
+        marker_size = 800 if speed < 0.1 else 200 + speed*15
+        ax.scatter(*current_pos, s=marker_size, c=[colors[idx]],
+                  edgecolors='k', zorder=4, marker='s' if speed < 0.1 else 'o')
+
+        # Velocity vector with dynamic scaling
+        if speed > 0.1:
+            ax.quiver(*current_pos, *v.velocity, 
+                     scale=1/(0.05*speed), scale_units='xy',
+                     color=colors[idx], width=0.003, 
+                     headwidth=5, zorder=3)
+
+        # Stop duration visualization
+        if v.stop_segments:
+            for stop in v.stop_segments:
+                if stop['end'] is None:  # Ongoing stop
+                    duration = time - stop['start'] if time else 0
+                else:
+                    duration = stop['end'] - stop['start']
+                if duration > 0:
+                    ax.annotate(
+                        f"⏸️ {duration:.1f}s", 
+                        (current_pos[0], current_pos[1] - 5),
+                        color='red', ha='center', va='top'
+                    )
+
+        # Information panel
+        text_str = (f"🚗 {v.id}\n"
+                    f"Speed: {speed:.1f} m/s\n"
+                    f"Position: ({current_pos[0]:.1f}, {current_pos[1]:.1f})\n"
+                    f"Total stopped: {v.stopped_time:.1f}s")
+        
+        ax.annotate(text_str, current_pos + np.array([5, 5]),
+                   color=colors[idx], fontsize=9, 
+                   bbox=dict(facecolor='white', alpha=0.9))
+
+    # Dynamic axis limits
+    all_positions = np.concatenate([v.position[None] for v in vehicles])
+    buffer = np.max([20, 0.2 * np.ptp(all_positions)])
+    ax.set_xlim(np.min(all_positions[:,0]) - buffer, 
+               np.max(all_positions[:,0]) + buffer)
+    ax.set_ylim(np.min(all_positions[:,1]) - buffer,
+               np.max(all_positions[:,1]) + buffer)
+
+    plt.title(f"Vehicle Dynamics Visualization{' at t='+str(time)+'s' if time else ''}")
+    plt.xlabel("X Position (m)")
+    plt.ylabel("Y Position (m)")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+def plot_vehicles(vehicles, time=None, xlim=(-10, 110), ylim=(-10, 110)):
+    """
+    Enhanced vehicle plotting with trajectory history, speed indicators, and stop duration
+    
+    Args:
+        vehicles (list[Vehicle]): Vehicles to plot
+        time (float, optional): Simulation time (for title)
+        xlim (tuple): X-axis limits
+        ylim (tuple): Y-axis limits
+    """
+    plt.figure(figsize=(10, 10))
+    ax = plt.gca()
+    
+    # Color map for different vehicles
+    colors = plt.cm.tab10(np.linspace(0, 1, len(vehicles)))
+    
+    for idx, v in enumerate(vehicles):
+        # Plot trajectory history
+        if hasattr(v, 'history'):
+            hist_pos = np.array([pos for t, pos in v.history])
+            ax.plot(hist_pos[:,0], hist_pos[:,1], '--', 
+                    color=colors[idx], alpha=0.4, 
+                    label=f'{v.id} Path')
+        
+        # Current position and velocity vector
+        current_pos = v.position
+        speed = np.linalg.norm(v.velocity)
+        arrow_scale = 2.0  # Scale factor for velocity vectors
+        
+        # Plot vehicle with speed-dependent marker size
+        ax.scatter(*current_pos, s=100 + speed*10, 
+                  color=colors[idx], edgecolors='k',
+                  label=f'{v.id} Position', zorder=4)
+        
+        # Velocity vector
+        ax.quiver(*current_pos, *v.velocity, 
+                 scale=1/(0.1*arrow_scale), scale_units='xy',
+                 color=colors[idx], angles='xy', 
+                 width=0.002, headwidth=4, zorder=3)
+        
+        # Annotation box
+        text_str = (f"ID: {v.id}\n"
+                    f"Speed: {speed:.1f} m/s\n"
+                    f"Vx: {v.velocity[0]:.1f} m/s\n"
+                    f"Vy: {v.velocity[1]:.1f} m/s")
+        
+        if hasattr(v, 'stopped_time') and v.stopped_time > 0:
+            text_str += f"\nStopped: {v.stopped_time:.1f}s"
+            ax.add_patch(plt.Circle(current_pos, 3, 
+                                   color='red', alpha=0.1))
+        
+        ax.annotate(text_str, current_pos + np.array([2, 2]),
+                   color=colors[idx], fontsize=9, 
+                   bbox=dict(facecolor='white', alpha=0.8))
+
+    # Dynamic axis limits
+    all_positions = np.concatenate([v.position[None] for v in vehicles])
+    buffer = 15
+    ax.set_xlim(min(all_positions[:,0].min(), xlim[0]) - buffer,
+               max(all_positions[:,0].max(), xlim[1]) + buffer)
+    ax.set_ylim(min(all_positions[:,1].min(), ylim[0]) - buffer,
+               max(all_positions[:,1].max(), ylim[1]) + buffer)
+
+    title = "Enhanced Vehicle Dynamics Visualization"
+    if time is not None:
+        title += f" at t={time:.2f}s"
+    ax.set_title(title, pad=20)
+    ax.set_xlabel("X Position (m)")
+    ax.set_ylabel("Y Position (m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right', framealpha=0.9)
+    plt.tight_layout()
+    plt.show()
+
+
+# Add history tracking to Vehicle class
+def move_to(self, t):
+    """Enhanced move_to with history tracking"""
+    dt = t - self.last_update
+    if dt != 0:
+        # Track stopped time (add this attribute to __init__)
+        if not hasattr(self, 'stopped_time'):
+            self.stopped_time = 0.0
+        if np.linalg.norm(self.velocity) < 0.1:  # Stopped threshold
+            self.stopped_time += dt
+            
+        # Track position history (add this attribute to __init__)
+        if not hasattr(self, 'history'):
+            self.history = []
+        self.history.append((t, self.position.copy()))
+        
+        self.position += self.velocity * dt
+        self.last_update = t
+
+# Add the enhanced method to the Vehicle class
+Vehicle.move_to = move_to
+
+
+
+# Example usage block
+if __name__ == "__main__":
+    # Create some vehicles
+    vehicles = [
+        Vehicle("A", 0, 0, 20, 0),
+        Vehicle("B", 100, 0, -15, 0)
+    ]
+    # Move vehicles to t=1 second
+    for v in vehicles:
+        v.move_to(1.0)
+    # Compute Doppler
+    dop = vehicles[1].doppler_shift(vehicles[0])
+    print(f"Doppler at B from A: {dop:.2f} Hz (f_max)")
+
+    # Initialize a channel fading process
+    chan = ChannelFading(f_max=abs(dop), init_time=1.0)
+    # Evolve channel over next 0.1s in steps and plot magnitude
+    times = np.linspace(1.0, 1.1, 50)
+    gains = []
+    for t in times:
+        gains.append(abs(chan.evolve_to(t)))
+    plt.figure()
+    plt.plot(times, gains)
+    plt.title("Time-Coherent Fading Magnitude")
+    plt.xlabel("Time (s)")
+    plt.ylabel("|h(t)|")
+    plt.grid(True)
+    plt.show()
