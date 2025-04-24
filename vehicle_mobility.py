@@ -23,10 +23,9 @@ class Vehicle:
         self.c = c
         self.last_update = 0.0
         self.history = []
-        self.stopped_time = 0.0
-        self.is_stopped = False
-        self.current_stop_duration = 0.0
-        self.stop_segments = []  # Track individual stop periods
+        self.stop_segments = []  # List of (start, end) tuples
+        self.current_stop_start = None
+        self._last_speed = np.linalg.norm([vx, vy])
 
     def move_to(self, t):
         dt = t - self.last_update
@@ -34,32 +33,31 @@ class Vehicle:
             return
 
         speed = np.linalg.norm(self.velocity)
-        stopped_threshold = 0.1
+        stopped_threshold = 0.1  # Consider stopped below this speed
         
-        # Update stop state tracking
-        if speed < stopped_threshold and not self.is_stopped:
-            # Start new stop period
-            self.is_stopped = True
-            self.current_stop_duration = 0.0
-            self.stop_segments.append({'start': t, 'end': None})
-        elif speed >= stopped_threshold and self.is_stopped:
-            # End current stop period
-            self.is_stopped = False
-            if self.stop_segments:
-                self.stop_segments[-1]['end'] = t
-                self.stopped_time += self.current_stop_duration
-                self.current_stop_duration = 0.0
-
-        # Accumulate time for current stop
-        if self.is_stopped:
-            self.current_stop_duration += dt
-            if self.stop_segments:
-                self.stop_segments[-1]['end'] = t  # Update ongoing stop
-
-        # Update position history before moving
+        # Track stop segments
+        if speed < stopped_threshold and self._last_speed >= stopped_threshold:
+            # Transition to stopped
+            self.current_stop_start = t
+        elif speed >= stopped_threshold and self._last_speed < stopped_threshold:
+            # Transition to moving
+            if self.current_stop_start is not None:
+                self.stop_segments.append((self.current_stop_start, t))
+                self.current_stop_start = None
+        
+        self._last_speed = speed
+        
+        # Update position history
         self.history.append((t, self.position.copy()))
         self.position += self.velocity * dt
         self.last_update = t
+
+    @property
+    def stopped_time(self):
+        total = sum(end - start for start, end in self.stop_segments)
+        if self.current_stop_start is not None:
+            total += self.last_update - self.current_stop_start
+        return total
 
     def doppler_shift(self, transmitter):
         """
@@ -309,29 +307,66 @@ def plot_vehicles(vehicles, time=None, xlim=(-10, 110), ylim=(-10, 110)):
     plt.tight_layout()
     plt.show()
 
-
-# Add history tracking to Vehicle class
-def move_to(self, t):
-    """Enhanced move_to with history tracking"""
-    dt = t - self.last_update
-    if dt != 0:
-        # Track stopped time (add this attribute to __init__)
-        if not hasattr(self, 'stopped_time'):
-            self.stopped_time = 0.0
-        if np.linalg.norm(self.velocity) < 0.1:  # Stopped threshold
-            self.stopped_time += dt
+def plot_vehicles_enriched(vehicles, time=None):
+    plt.figure(figsize=(12, 12))
+    ax = plt.gca()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(vehicles)))
+    
+    for idx, v in enumerate(vehicles):
+        # Plot trajectory with stop segments
+        if v.history:
+            times, positions = zip(*v.history)
+            x, y = zip(*positions)
+            ax.plot(x, y, '--', color=colors[idx], alpha=0.4)
             
-        # Track position history (add this attribute to __init__)
-        if not hasattr(self, 'history'):
-            self.history = []
-        self.history.append((t, self.position.copy()))
+            # Mark stop segments on trajectory
+            for start, end in v.stop_segments:
+                mask = (np.array(times) >= start) & (np.array(times) <= end)
+                if any(mask):
+                    ax.scatter(np.array(x)[mask], np.array(y)[mask], 
+                              color='red', s=20, alpha=0.7, zorder=2)
+
+        # Current position and velocity
+        current_pos = v.position
+        speed = np.linalg.norm(v.velocity)
         
-        self.position += self.velocity * dt
-        self.last_update = t
+        # Vehicle marker with stop indicator
+        marker = 's' if speed < 0.1 else 'o'
+        ax.scatter(*current_pos, s=200, color=colors[idx],
+                  edgecolors='k', zorder=4, marker=marker)
 
-# Add the enhanced method to the Vehicle class
-Vehicle.move_to = move_to
+        # Velocity vector
+        if speed > 0.1:
+            ax.quiver(*current_pos, *v.velocity, 
+                     scale=1/(0.05*speed), scale_units='xy',
+                     color=colors[idx], width=0.003, 
+                     headwidth=5, zorder=3)
 
+        # Stop duration annotation
+        if v.stop_segments or v.current_stop_start:
+            stop_text = "\n".join([f"⏸️ {end-start:.1f}s" for start, end in v.stop_segments])
+            if v.current_stop_start:
+                current_stop = time - v.current_stop_start if time else 0
+                stop_text += f"\n⏸️ {current_stop:.1f}s (current)"
+            ax.annotate(stop_text, (current_pos[0], current_pos[1] - 8),
+                       color='red', ha='center', va='top', fontsize=8)
+
+        # Information panel
+        text_str = (f"🚦 {v.id}\n"
+                    f"Speed: {speed:.1f} m/s\n"
+                    f"Position: {current_pos}\n"
+                    f"Total stopped: {v.stopped_time:.1f}s")
+        
+        ax.annotate(text_str, current_pos + np.array([5, 5]),
+                   color=colors[idx], fontsize=9, 
+                   bbox=dict(facecolor='white', alpha=0.9))
+
+    ax.set_title(f"Stoplight Scenario Visualization{' at t='+str(time)+'s' if time else ''}")
+    ax.set_xlabel("X Position (m)")
+    ax.set_ylabel("Y Position (m)")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
 
 # Example usage block

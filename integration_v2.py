@@ -8,9 +8,9 @@ import ofdm_simulation_v2 as phy  # existing OFDM simulation module
 from scipy.special import erfc
 
 # CSMA-CA parameters
-difs_slots = 2      # DIFS in slot units
-slot_time = getattr(phy, 'SLOT_TIME', 50e-6)  # 50 μs slot default
-cw_min = 4           # min contention window (slots)
+difs_slots = 2.5      # DIFS in slot units
+slot_time = getattr(phy, 'SLOT_TIME', 20e-6)  # 50 μs slot default
+cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
 
 class Device:
@@ -34,7 +34,7 @@ class Device:
 
     def start_backoff(self):
         self.state = 'BACKOFF'
-        self.backoff = random.randint(0, self.cw - 1)
+        self.backoff = random.randint(0, self.cw)
         # exponential backoff for next attempt
         self.cw = min(self.cw * 2, cw_max)
 
@@ -98,68 +98,6 @@ class MACSim:
         real_idx = re_idx.round().astype(int)
         imag_idx = im_idx.round().astype(int)
         return (imag_idx * m + real_idx).astype(int)
-
-    # def handle_transmission(self, t, tx_id):
-    #     """Called when a device's backoff expires (packet transmission)."""
-    #     self.channel_busy = True
-    #     tx = self.vehicles[tx_id]
-    #     # pre-generate channel and mobility state at time t
-    #     for v in self.vehicles.values():
-    #         v.move_to(t)
-    #     # prepare fading for each link
-    #     for rx_id in self.vehicles:
-    #         if rx_id != tx_id:
-    #             f_d = abs(self.vehicles[rx_id].doppler_shift(tx))
-    #             key = (tx_id, rx_id)
-    #             if key not in self.fading:
-    #                 self.fading[key] = ChannelFading(f_max=f_d, init_time=t)
-    #             self.fading[key].f_max = f_d
-    #             # loop receivers and symbols
-    #     symbol_duration = getattr(phy,'SYMBOL_DURATION', 1e-4)
-    #     for rx_id, rx in self.vehicles.items():
-    #         if rx_id == tx_id: continue
-    #         total_errors = 0
-    #         total_bits = 0
-    #         chan = self.fading[(tx_id, rx_id)]
-    #         # transmit multiple OFDM symbols in one packet
-    #         for k in range(self.symbols_per_packet):
-    #             # compute symbol-specific time for fading evolution
-    #             sym_time = t + k * symbol_duration
-    #             h = chan.evolve_to(sym_time)
-    #             # 1) random data & QAM
-    #             data_syms = np.random.randint(0, self.mod_order, self.Nfft)
-    #             mod_syms  = phy.qammod(data_syms, self.mod_order)
-    #             # 2) OFDM TX
-    #             tx_signal = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
-    #             # 3) channel fading (already got h)
-    #             rx_signal = h * tx_signal
-    #             # 4) impairments
-    #             rx_signal = phy.add_phase_noise(rx_signal, getattr(phy,'phase_noise_std',0.01))
-    #             rx_signal = phy.add_awgn(rx_signal, getattr(phy,'snr_db',10))
-    #             rx_signal = phy.add_quantization_noise(rx_signal, getattr(phy,'quant_bits',10))
-    #             # 5) OFDM RX + equalize
-    #             rx_syms = phy.ofdm_receiver(rx_signal, self.Nfft, self.Ncp)
-    #             rx_eq   = rx_syms / h
-    #             # 6) demod & BER
-    #             rx_inds = self.qam_demod(rx_eq)
-    #             errs = np.unpackbits((rx_inds ^ data_syms).astype(np.uint8)).sum()
-    #             total_errors += errs
-    #             total_bits   += self.Nfft * self.bits_per_symbol
-    #         # average BER
-    #         ber = total_errors / total_bits
-    #         inst_snr_db = getattr(phy,'snr_db',20) + 20*np.log10(abs(h))
-    #         # log
-    #         self.log.append({
-    #             'time': t,
-    #             'tx': tx_id,
-    #             'rx': rx_id,
-    #             'snr_dB': inst_snr_db,
-    #             'ber': ber,
-    #             'success': ber < 1e-3
-    #         })
-    #     # clear channel after packet
-    #     yield self.env.timeout(self.symbols_per_packet * symbol_duration)
-    #     self.channel_busy = False
 
     def handle_transmission(self, t, tx_id):
         """
@@ -235,82 +173,7 @@ class MACSim:
                 'rx': rx_id,
                 'snr_dB': inst_snr_db,
                 'ber': ber,
-                'success': ber < 1e-3
-            })
-        # Release channel after packet
-        yield self.env.timeout(self.symbols_per_packet * symbol_dur)
-        self.channel_busy = False
-
-    def handle_transmission_vold(self, t, tx_id):
-        """
-        Called when a device's backoff expires (packet transmission).
-        Applies distance-based path loss, small-scale fading, and fixed-noise AWGN.
-        """
-        self.channel_busy = True
-        tx = self.vehicles[tx_id]
-        # Move all vehicles to current time
-        for v in self.vehicles.values():
-            v.move_to(t)
-        # Prepare fading and Doppler per link
-        for rx_id, rx in self.vehicles.items():
-            if rx_id == tx_id: continue
-            f_d = abs(rx.doppler_shift(tx))
-            key = (tx_id, rx_id)
-            if key not in self.fading:
-                self.fading[key] = ChannelFading(f_max=f_d, init_time=t)
-            self.fading[key].f_max = f_d
-        # Simulation parameters
-        symbol_dur = getattr(phy, 'SYMBOL_DURATION', 1e-4)
-        c = 3e8
-        fc = getattr(phy, 'CARRIER_FREQ', 5.9e9)
-        lam = c / fc
-        # Transmit to each receiver
-        for rx_id, rx in self.vehicles.items():
-            if rx_id == tx_id: continue
-            chan = self.fading[(tx_id, rx_id)]
-            total_err = 0
-            total_bits = 0
-            # Compute distance-based path loss
-            disp = rx.position - tx.position
-            dist = np.linalg.norm(disp)
-            pl_lin = (lam / (4 * np.pi * dist))**2 if dist > 0 else 1.0
-            # Noise settings
-            snr_db = getattr(phy, 'snr_db', 20)
-            snr_lin = 10**(snr_db / 10)
-            # Multiple OFDM symbols
-            for k in range(self.symbols_per_packet):
-                sym_time = t + k * symbol_dur
-                h = chan.evolve_to(sym_time)
-                # 1) QAM symbols
-                data_syms = np.random.randint(0, self.mod_order, self.Nfft)
-                mod_syms = phy.qammod(data_syms, self.mod_order)
-                # 2) OFDM TX
-                tx_sig = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
-                # 3) Apply path loss and fading
-                rx_sig = np.sqrt(pl_lin) * h * tx_sig
-                # 4) Impairments: phase noise + AWGN + quantization
-                rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
-                rx_sig = phy.add_awgn(rx_sig, snr_db)
-                rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
-                # 5) OFDM RX & equalize
-                rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
-                rx_eq = rx_syms / h
-                # 6) Demod & count bit errors
-                rx_idx = self.qam_demod(rx_eq)
-                total_err += np.unpackbits((rx_idx ^ data_syms).astype(np.uint8)).sum()
-                total_bits += self.Nfft * self.bits_per_symbol
-            # Compute BER and instantaneous SNR
-            ber = total_err / total_bits
-            inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
-            inst_snr_db = 10 * np.log10(inst_snr_lin) if inst_snr_lin > 0 else -np.inf
-            # Log
-            self.log.append({
-                'time': t,
-                'tx': tx_id,
-                'rx': rx_id,
-                'snr_dB': inst_snr_db,
-                'ber': ber,
-                'success': ber < 1e-3
+                'success': ber < 1e-1
             })
         # Release channel after packet
         yield self.env.timeout(self.symbols_per_packet * symbol_dur)
@@ -501,8 +364,8 @@ def simulate_stoplight():
     print("\n=== Stoplight Scenario ===")
     # Set up two vehicles heading toward x=50 m
     vehicles_sl = [
-        Vehicle('V1', -20,   0, 2.0, 0),   # starting at x=0 m, speed 10 m/s
-        Vehicle('V2', 0, -20, 0, 2.0)    # starting at x=-20 m, speed 10 m/s
+        Vehicle('V1', -200,   0, 20.0, 0),   # starting at x=0 m, speed 10 m/s
+        Vehicle('V2', 0, -200, 0, 20.0)    # starting at x=-20 m, speed 10 m/s
     ]
     env_sl = simpy.Environment()
     mac_sl = MACSim(env_sl, vehicles_sl, symbols_per_packet=500)
@@ -513,25 +376,28 @@ def simulate_stoplight():
         yield env.timeout(10.0)
         print("Stoplight RED at t=10.0 s")
         for v in vehicles_sl:
-            v.velocity = np.array([0, 0])
-        # At t=25.0 s, turn green: vehicles resume 10 m/s
+            if (v.id == 'V1'):
+                v.velocity = np.array([3.0,0])
+            else:
+                v.velocity = np.array([0, 3.0])
+        # At t=30.0 s, turn green: vehicles resume 10 m/s
         yield env.timeout(4.0)
         print("Stoplight1 GREEN at t=14.0 s")
         for v in vehicles_sl:
             if (v.id == 'V1'):
-                v.velocity = np.array([2.0,0])
+                v.velocity = np.array([20.0,0])
         # At t=30.0 s, turn green: vehicles resume 10 m/s
         yield env.timeout(4.0)
         print("Stoplight2 GREEN at t=18.0 s")
         for v in vehicles_sl:
             if (v.id == 'V2'):
-                v.velocity = np.array([0,2.0])
+                v.velocity = np.array([0,20.0])
 
 
     env_sl.process(control(env_sl))
 
     # Run the simulation
-    df_sl = mac_sl.run(until=24.0)
+    df_sl = mac_sl.run(until=20.0)
 
     # Print first few PHY events
     print("=== PHY Log (Stoplight, first 1000 rows) ===")
