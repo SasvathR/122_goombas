@@ -219,7 +219,7 @@ def basic_simulation():
     mac.plot_ber_vs_time(df)
 
 if __name__ == '__main__':
-    basic_simulation()
+    # basic_simulation()
     # test_static_channel()
     # test_awgn_benchmark()
     # test_fading_autocorr()
@@ -227,4 +227,4 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    # simulate_stoplight()
+    simulate_stoplight()

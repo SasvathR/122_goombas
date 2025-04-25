@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from vehicle_mobility import ChannelFading
 import ofdm_simulation_v2 as phy  # existing OFDM simulation module
+from numba import njit
 
 # CSMA-CA parameters
 difs_slots = 2.5      # DIFS in slot units
@@ -31,7 +32,7 @@ class Device:
         self.difs = difs_slots
         self.backoff = 0
         env.process(self.tick())  # start FSM
-        self.n_transmit = 4
+        self.n_transmit = 1e2
 
     def start_difs(self):
         self.state = 'DIFS'
@@ -77,6 +78,144 @@ class Device:
             elif self.state == 'BACKOFF' and not busy:
                 self.backoff -= 1
 
+class ConvCoder:
+    def __init__(self, K=7, G1o=0o133, G2o=0o171):
+        self.K = K
+        self.G1o = G1o
+        self.G2o = G2o
+        self.n_states = 1 << (K - 1)
+        self.G1 = np.array([(G1o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
+        self.G2 = np.array([(G2o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        return fast_conv_encode_nb(bits, self.K, self.G1o, self.G2o)
+
+    def decode(self, coded: np.ndarray, msg_len: int) -> np.ndarray:
+        return fast_viterbi_decode_nb(coded, msg_len, self.K, self.G1o, self.G2o)
+
+
+@njit
+def popcount(x):
+    """Count set bits in integer x."""
+    count = 0
+    while x:
+        count += x & 1
+        x >>= 1
+    return count
+
+@njit
+def fast_conv_encode_nb(bits, K, G1o, G2o):
+    """
+    Numba-accelerated rate-1/2 convolutional encoder (terminated flush).
+    bits: 1D uint8 array of 0/1.
+    Returns: 1D uint8 array of coded bits length = 2*(len(bits) + K - 1).
+    """
+    n = bits.size
+    total = 2 * (n + K - 1)
+    out = np.empty(total, dtype=np.uint8)
+    st = 0  # state holds last K-1 bits
+    idx = 0
+
+    # Encode message bits
+    for i in range(n):
+        b = bits[i]
+        inp = (b << (K - 1)) | st
+        o1 = popcount(inp & G1o) & 1
+        o2 = popcount(inp & G2o) & 1
+        out[idx] = o1
+        out[idx + 1] = o2
+        idx += 2
+        # Update state: shift right, insert b at MSB of K-1 bits
+        st = (st >> 1) | (b << (K - 2))
+
+    # Flush (K-1) zero bits
+    for _ in range(K - 1):
+        inp = st  # since b=0, inp = st
+        o1 = popcount(inp & G1o) & 1
+        o2 = popcount(inp & G2o) & 1
+        out[idx] = o1
+        out[idx + 1] = o2
+        idx += 2
+        st = st >> 1  # shift right
+
+    return out
+
+@njit
+def fast_viterbi_decode_nb(coded, msg_len, K, G1o, G2o):
+    """
+    Numba-accelerated hard-decision Viterbi decoder for rate-1/2 conv code.
+    coded: 1D uint8 array of coded bits.
+    msg_len: original message bit length.
+    Returns: 1D uint8 array of decoded bits length = msg_len.
+    """
+    n_states = 1 << (K - 1)
+    # Build trellis
+    next_state = np.zeros((n_states, 2), np.int32)
+    output     = np.zeros((n_states, 2), np.uint8)
+    for st in range(n_states):
+        for b in (0, 1):
+            inp = (b << (K - 1)) | st
+            o1  = popcount(inp & G1o) & 1
+            o2  = popcount(inp & G2o) & 1
+            ns  = ((st >> 1) | (b << (K - 2))) & (n_states - 1)
+            next_state[st, b] = ns
+            output[st, b]     = (o1 << 1) | o2
+
+    n_steps = coded.size // 2
+    INF     = 10**9
+    pm      = np.full(n_states, INF, np.int32)
+    pm[0]   = 0
+    prev    = np.zeros((n_steps, n_states), np.int32)
+
+    # Forward pass
+    for t in range(n_steps):
+        r0 = coded[2*t]
+        r1 = coded[2*t+1]
+        new_pm = np.full(n_states, INF, np.int32)
+        for st in range(n_states):
+            for b in (0, 1):
+                ns   = next_state[st, b]
+                outb = output[st, b]
+                exp0 = (outb >> 1) & 1
+                exp1 = outb & 1
+                metric = pm[st] + (r0 != exp0) + (r1 != exp1)
+                if metric < new_pm[ns]:
+                    new_pm[ns]  = metric
+                    prev[t, ns] = st
+        pm = new_pm
+
+    # Traceback
+    state = 0
+    best  = pm[0]
+    for s in range(1, n_states):
+        if pm[s] < best:
+            best  = pm[s]
+            state = s
+
+    dec = np.empty(n_steps, dtype=np.uint8)
+    for t in range(n_steps - 1, -1, -1):
+        dec[t] = (state >> (K - 2)) & 1
+        state   = prev[t, state]
+
+    return dec[:msg_len]
+
+class ConvCoder:
+    """
+    Numba-backed convolutional coder with matching encode/decode.
+    """
+    def __init__(self, K=7, G1o=0o133, G2o=0o171):
+        self.K    = K
+        self.G1o  = G1o
+        self.G2o  = G2o
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        bits = bits.astype(np.uint8)
+        return fast_conv_encode_nb(bits, self.K, self.G1o, self.G2o)
+
+    def decode(self, coded: np.ndarray, msg_len: int) -> np.ndarray:
+        coded = coded.astype(np.uint8)
+        return fast_viterbi_decode_nb(coded, msg_len, self.K, self.G1o, self.G2o)
+
 class MACSim:
     """
     Orchestrates CSMA-CA MAC and OFDM PHY.
@@ -105,81 +244,7 @@ class MACSim:
             self.devices.append(dev)
             env.timeout(random.randint(1, 15) * 1e-6)
 
-        self.K = 7
-
-        self.G1 = int_to_bits(0o133, self.K)  # [1, 0, 1, 1, 0, 1, 1]
-        self.G1o = 0o133
-        self.G2 = int_to_bits(0o171, self.K)  # [1, 1, 1, 1, 0, 0, 1]
-        self.G2o = 0o171
-
-        self.TRELLIS = self.precompute_trellis()
-
-    def precompute_trellis(self):
-        n_states = 2**(self.K - 1)
-        trellis = np.zeros((n_states, 2), dtype=[('next_state', np.uint8), ('output', np.uint8)])
-        for state in range(n_states):
-            for bit in [0, 1]:
-                input_state = (bit << (self.K - 1)) | state
-                o1 = bin(input_state & self.G1o).count('1') % 2
-                o2 = bin(input_state & self.G2o).count('1') % 2
-                next_state = ((state >> 1) | (bit << (self.K - 2))) & (n_states - 1)
-                trellis[state, bit] = (next_state, (o1 << 1) | o2)
-        return trellis
-
-    def conv_encode(self, msg_bits):
-        """
-        Rate 1/2 convolutional encoder (constraint length 7).
-        Generators: G1 = 133 (octal), G2 = 171 (octal).
-        """
-
-        msg = np.array(msg_bits, dtype=int)
-        padded = np.concatenate([msg, np.zeros(self.K- 1, dtype=int)])  # tail bits
-        encoded = []
-
-        for i in range(len(msg)):
-            window = padded[i:i + self.K]
-            out1 = np.sum(self.G1 * window) % 2
-            out2 = np.sum(self.G2 * window) % 2
-            encoded.extend([out1, out2])
-
-        return np.array(encoded, dtype=int)
-    
-    def conv_decode(self, encoded_bits):
-        n_states = 2**(self.K - 1)
-        n_steps = len(encoded_bits) // 2
-
-        path_metrics = np.full((n_states,), np.inf)
-        path_metrics[0] = 0
-        prev_states = np.zeros((n_steps, n_states), dtype=np.uint8)
-
-        for t in range(n_steps):
-            r = encoded_bits[2*t:2*t+2]
-            new_metrics = np.full((n_states,), np.inf)
-
-            for state in range(n_states):
-                for bit in [0, 1]:
-                    next_state = self.TRELLIS[state, bit]['next_state']
-                    expected = self.TRELLIS[state, bit]['output']
-                    expected_bits = [(expected >> 1) & 1, expected & 1]
-                    metric = np.sum(r != expected_bits)
-                    new_metric = path_metrics[state] + metric
-
-                    if new_metric < new_metrics[next_state]:
-                        new_metrics[next_state] = new_metric
-                        prev_states[t, next_state] = state
-
-            path_metrics = new_metrics
-
-        # Traceback
-        state = np.argmin(path_metrics)
-        decoded = []
-        for t in reversed(range(n_steps)):
-            prev = prev_states[t, state]
-            decoded_bit = (state >> (self.K - 2)) & 1
-            decoded.append(decoded_bit)
-            state = prev
-
-        return np.array(decoded[::-1][:self.Nfft], dtype=int)
+        self.coder = ConvCoder()
 
     def qam_demod(self, rx_syms):
         """Demodulate QAM symbols back to integer indices."""
@@ -236,8 +301,8 @@ class MACSim:
                 sym_time = t + k * symbol_dur
                 h = chan.evolve_to(sym_time)
                 # 1) QAM symbols
-                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft)
-                data_enc = data_bin # self.conv_encode(data_bin)
+                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // 2)
+                data_enc = self.coder.encode(data_bin)
                 # print(data_enc)
                 data_syms = data_enc.reshape(-1, self.bits_per_symbol)
                 powers = 2 ** np.arange(self.bits_per_symbol)[::-1]
@@ -248,9 +313,9 @@ class MACSim:
                 # 3) Apply path loss and fading
                 rx_sig = np.sqrt(pl_lin) * h * tx_sig
                 # 4) Impairments: phase noise + AWGN + quantization
-                # rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
-                # rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
-                # rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
+                rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
+                rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
+                rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
                 rx_eq = rx_syms / h
@@ -259,9 +324,9 @@ class MACSim:
                 # print(len(rx_idx))
                 rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
                 # print(rx_bits)
-                print(self.conv_decode(self.conv_encode(np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]))))
+                # print(self.coder.decode(self.coder.encode(np.array([0,1,0,1,0,1,0,1,0,1])), msg_len=10))
 
-                rx_bin = rx_bits # self.conv_decode(rx_bits)
+                rx_bin = self.coder.decode(rx_bits, msg_len=self.Nfft * self.bits_per_symbol // 2)
                 # count symbol errors by popcount over bits_per_symbol bits
                 errs = np.sum(data_bin != rx_bin)
                 total_err += errs * self.bits_per_symbol
