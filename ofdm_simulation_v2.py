@@ -143,8 +143,6 @@ def add_awgn_fixed_noise(sig, snr_db, p_tx=1.0):
         np.random.randn(*sig.shape) + 1j*np.random.randn(*sig.shape)
     )
     return sig + noise
-add_awgn = add_awgn_fixed_noise
-
 
 def add_phase_noise(x, std):
     return x * np.exp(1j*std*np.random.randn(*x.shape))
@@ -305,11 +303,29 @@ def main():
             diag.update(tx=tx,rx=rx,mod_syms=mod_syms,rx_syms=rx_syms,h_ls=h_ls)
     print("Avg MSE LS:",mse_ls.mean(), "LMMSE:",mse_lmmse.mean())
 
-    
     plt.figure(); 
     plt.scatter(np.real(diag['rx_syms']),np.imag(diag['rx_syms']),label="Rx")
     plt.scatter(np.real(diag['mod_syms']),np.imag(diag['mod_syms']),marker='x',label="Tx")
     plt.title("Constellation");plt.legend();plt.grid(True)
+
+    
+    # pull out what you saved in diag:
+    rx_raw    = diag['rx_syms']    # complex vector length Nfft
+    tx_ideal  = diag['mod_syms']   # original QAM symbols
+    h_ls      = diag['h_ls']       # your LS estimate of the channel
+
+    # equalize:
+    rx_eq = rx_raw / h_ls
+
+    plt.figure()
+    plt.scatter(rx_eq.real, rx_eq.imag, label="Equalized Rx", alpha=0.7)
+    plt.scatter(tx_ideal.real, tx_ideal.imag, marker='x', c='r', label="Tx Ideal")
+    plt.title("Constellation (Post-Equalization)")
+    plt.xlabel("In-Phase"); plt.ylabel("Quadrature")
+    plt.legend(); plt.grid(True)
+    plt.show()
+
+    
 
     # call diagnostics
     plot_test_data(Nfft,mod_order)
