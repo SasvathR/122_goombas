@@ -149,7 +149,7 @@ class MACSim:
                 rx_sig = np.sqrt(pl_lin) * h * tx_sig
                 # 4) Impairments: phase noise + AWGN + quantization
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
-                rx_sig = phy.add_awgn(rx_sig, snr_db)
+                rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
                 rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
@@ -237,10 +237,10 @@ def test_static_channel():
     orig_evolve = ChannelFading.evolve_to
     ChannelFading.evolve_to = lambda self, t: 1+0j
     # Disable impairments: AWGN, phase noise, quantization
-    orig_awgn = phy.add_awgn
+    orig_awgn = phy.add_awgn_fixed_noise
     orig_phase = phy.add_phase_noise
     orig_quant = phy.add_quantization_noise
-    phy.add_awgn = lambda x, snr: x
+    phy.add_awgn_fixed_noise = lambda x, snr: x
     phy.add_phase_noise = lambda x, std: x
     phy.add_quantization_noise = lambda x, bits: x
     # Run simulation with static channel
@@ -253,7 +253,7 @@ def test_static_channel():
     assert max_ber == 0 or np.isnan(max_ber), "Static channel BER non-zero!"
     # Restore patched functions
     ChannelFading.evolve_to = orig_evolve
-    phy.add_awgn = orig_awgn
+    phy.add_awgn_fixed_noise = orig_awgn
     phy.add_phase_noise = orig_phase
     phy.add_quantization_noise = orig_quant
     ChannelFading.evolve_to = orig_evolve
@@ -269,7 +269,7 @@ def test_awgn_benchmark():
     bits = np.random.randint(0, M, Nsym)
     syms = phy.qammod(bits, M)
     for snr_db in [0, 5, 10, 15, 20]:
-        rx = phy.add_awgn(syms, snr_db)
+        rx = phy.add_awgn_fixed_noise(syms, snr_db)
         # simple demodulation by nearest neighbor
         rx_inds = np.array([np.argmin(np.abs(s - syms)) for s in rx])
         ber = np.mean(rx_inds != bits)
