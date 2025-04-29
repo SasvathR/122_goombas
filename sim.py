@@ -220,7 +220,7 @@ class MACSim:
     """
     def __init__(self, env, vehicles, symbols_per_packet=100):
         self.env = env
-        self.do_conv = False
+        self.do_conv = True
         self.vehicles = {v.id: v for v in vehicles}
         self.devices = []
         self.initial_positions = {v.id: v.position.copy() for v in vehicles}
@@ -302,9 +302,10 @@ class MACSim:
                     scale = 1
                 data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // scale)
                 if self.do_conv:
-                    data_bin = self.coder.encode(data_bin)
-                # print(data_enc)
-                data_syms = data_bin.reshape(-1, self.bits_per_symbol)
+                    data_enc = self.coder.encode(data_bin)
+                    data_syms = data_enc.reshape(-1, self.bits_per_symbol)
+                else:
+                    data_syms = data_bin.reshape(-1, self.bits_per_symbol)
                 powers = 2 ** np.arange(self.bits_per_symbol)[::-1]
                 data_syms = data_syms.dot(powers)
                 mod_syms = phy.qammod(data_syms, self.mod_order)
@@ -315,7 +316,7 @@ class MACSim:
                 # 4) Impairments: phase noise + AWGN + quantization
                 rx_sig = phy.add_awgn(rx_sig, snr_db)
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
-                rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
+                # rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
                 rx_eq = rx_syms / h
