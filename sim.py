@@ -13,10 +13,6 @@ slot_time = getattr(phy, 'SLOT_TIME', 20e-6)  # 50 μs slot default
 cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
 
-def int_to_bits(x, width):
-    """Convert integer to binary list."""
-    return [int(b) for b in format(x, f'0{width}b')]
-
 class Device:
     """
     MAC-layer device implementing simplified CSMA-CA.
@@ -253,6 +249,40 @@ class MACSim:
         real_idx = re_idx.round().astype(int)
         imag_idx = im_idx.round().astype(int)
         return (imag_idx * m + real_idx).astype(int)
+    
+    def generate_bsm(self, vehicle, t):
+        """Generate a binary BSM message from vehicle state."""
+        def int_to_bits(x, width):
+            return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
+
+        lat = int(37.7749 * 1e7)
+        lon = int(-122.4194 * 1e7)
+        elev = int(15)
+        speed = int(np.linalg.norm(vehicle.velocity) * 100)
+        heading = int(np.degrees(np.arctan2(vehicle.velocity[1], vehicle.velocity[0])) * 100) % 36000
+        ax, ay, az = [int(x * 1000) for x in [0.5, 0.0, -9.8]]
+        size_l, size_w = int(4.5 * 100), int(1.8 * 100)
+        fields = [
+            int_to_bits(0x20, 8),                # Message ID
+            int_to_bits(0x3F29A78B, 32),         # Temporary ID
+            int_to_bits(int(t * 1000), 32),      # Timestamp in ms
+            int_to_bits(lat, 32),
+            int_to_bits(lon, 32),
+            int_to_bits(elev, 16),
+            [1],                                 # Accuracy = high
+            int_to_bits(speed, 16),
+            int_to_bits(heading, 16),
+            int_to_bits(ax, 16),
+            int_to_bits(ay, 16),
+            int_to_bits(az, 16),
+            int_to_bits(0, 16),                  # Yaw Rate
+            int_to_bits(0, 8),                   # Brake Status
+            int_to_bits(size_l, 16),
+            int_to_bits(size_w, 16),
+        ]
+        bits = np.array([bit for field in fields for bit in field], dtype=np.uint8)
+        return bits
+
 
     def handle_transmission(self, t, tx_id):
         """
@@ -300,7 +330,14 @@ class MACSim:
                     scale = 2 
                 else: 
                     scale = 1
-                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // scale)
+                data_bin = self.generate_bsm(tx, sym_time)
+                required_len = self.bits_per_symbol * self.Nfft // scale
+                if len(data_bin) < required_len:
+                    pad_len = required_len - len(data_bin)
+                    data_bin = np.concatenate([data_bin, np.zeros(pad_len, dtype=np.uint8)])
+                else:
+                    data_bin = data_bin[:required_len]
+
                 if self.do_conv:
                     data_enc = self.coder.encode(data_bin)
                     data_syms = data_enc.reshape(-1, self.bits_per_symbol)
