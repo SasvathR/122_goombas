@@ -226,6 +226,7 @@ class MACSim:
     """
     def __init__(self, env, vehicles, symbols_per_packet=100):
         self.env = env
+        self.do_conv = False
         self.vehicles = {v.id: v for v in vehicles}
         self.devices = []
         self.initial_positions = {v.id: v.position.copy() for v in vehicles}
@@ -301,10 +302,15 @@ class MACSim:
                 sym_time = t + k * symbol_dur
                 h = chan.evolve_to(sym_time)
                 # 1) QAM symbols
-                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // 2)
-                data_enc = self.coder.encode(data_bin)
+                if self.do_conv: 
+                    scale = 2 
+                else: 
+                    scale = 1
+                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // scale)
+                if self.do_conv:
+                    data_bin = self.coder.encode(data_bin)
                 # print(data_enc)
-                data_syms = data_enc.reshape(-1, self.bits_per_symbol)
+                data_syms = data_bin.reshape(-1, self.bits_per_symbol)
                 powers = 2 ** np.arange(self.bits_per_symbol)[::-1]
                 data_syms = data_syms.dot(powers)
                 mod_syms = phy.qammod(data_syms, self.mod_order)
@@ -326,9 +332,10 @@ class MACSim:
                 # print(rx_bits)
                 # print(self.coder.decode(self.coder.encode(np.array([0,1,0,1,0,1,0,1,0,1])), msg_len=10))
 
-                rx_bin = self.coder.decode(rx_bits, msg_len=self.Nfft * self.bits_per_symbol // 2)
+                if self.do_conv:
+                    rx_bits = self.coder.decode(rx_bits, msg_len=self.Nfft * self.bits_per_symbol // 2)
                 # count symbol errors by popcount over bits_per_symbol bits
-                errs = np.sum(data_bin != rx_bin)
+                errs = np.sum(data_bin != rx_bits)
                 total_err += errs * self.bits_per_symbol
                 total_bits += self.Nfft * self.bits_per_symbol
             # Compute BER and instantaneous SNR
