@@ -5,12 +5,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from vehicle_mobility import ChannelFading
 import ofdm_simulation_v2 as phy  # existing OFDM simulation module
+from numba import njit
 
 # CSMA-CA parameters
 difs_slots = 2.5      # DIFS in slot units
 slot_time = getattr(phy, 'SLOT_TIME', 20e-6)  # 50 μs slot default
 cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
+
+def int_to_bits(x, width):
+    """Convert integer to binary list."""
+    return [int(b) for b in format(x, f'0{width}b')]
 
 class Device:
     """
@@ -19,13 +24,14 @@ class Device:
     """
     def __init__(self, id, env, mac):
         self.id = id
+        self.n_collision = 0
         self.env = env
         self.mac = mac
         self.state = 'IDLE'
-        self.cw = cw_min
         self.difs = difs_slots
         self.backoff = 0
         env.process(self.tick())  # start FSM
+        self.n_transmit = 1e2
 
     def start_difs(self):
         self.state = 'DIFS'
@@ -33,15 +39,27 @@ class Device:
 
     def start_backoff(self):
         self.state = 'BACKOFF'
-        self.backoff = random.randint(0, self.cw)
-        # exponential backoff for next attempt
-        self.cw = min(self.cw * 2, cw_max)
+        self.backoff = random.randint(0, min(cw_max, (cw_min + 1) * (2 ** self.n_collision) - 1))
 
     def tick(self):
-        """Run every slot_time to update MAC state."""
+        """Run every us to update MAC state."""
         while True:
             yield self.env.timeout(slot_time)
             busy = self.mac.channel_busy
+            if self.backoff <= 0:
+                if busy:
+                    # collision
+                    self.n_collision += 1
+                    self.start_backoff()
+                    continue
+                else:
+                    # if self.n_transmit < 0:
+                    #     continue
+                    # schedule transmission process
+                    self.env.process(self.mac.handle_transmission(self.env.now, self.id))
+                    self.state = 'IDLE'
+                    self.n_collision = 0
+                    self.n_transmit -= 1
             if self.state == 'IDLE' and not busy:
                 self.start_difs()
             elif self.state == 'DIFS':
@@ -53,10 +71,144 @@ class Device:
                         self.start_backoff()
             elif self.state == 'BACKOFF' and not busy:
                 self.backoff -= 1
-                if self.backoff <= 0:
-                    # schedule transmission process
-                    self.env.process(self.mac.handle_transmission(self.env.now, self.id))
-                    self.state = 'IDLE'
+
+class ConvCoder:
+    def __init__(self, K=7, G1o=0o133, G2o=0o171):
+        self.K = K
+        self.G1o = G1o
+        self.G2o = G2o
+        self.n_states = 1 << (K - 1)
+        self.G1 = np.array([(G1o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
+        self.G2 = np.array([(G2o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        return fast_conv_encode_nb(bits, self.K, self.G1o, self.G2o)
+
+    def decode(self, coded: np.ndarray, msg_len: int) -> np.ndarray:
+        return fast_viterbi_decode_nb(coded, msg_len, self.K, self.G1o, self.G2o)
+
+
+@njit
+def popcount(x):
+    """Count set bits in integer x."""
+    count = 0
+    while x:
+        count += x & 1
+        x >>= 1
+    return count
+
+@njit
+def fast_conv_encode_nb(bits, K, G1o, G2o):
+    """
+    Numba-accelerated rate-1/2 convolutional encoder (terminated flush).
+    bits: 1D uint8 array of 0/1.
+    Returns: 1D uint8 array of coded bits length = 2*(len(bits) + K - 1).
+    """
+    n = bits.size
+    total = 2 * (n + K - 1)
+    out = np.empty(total, dtype=np.uint8)
+    st = 0  # state holds last K-1 bits
+    idx = 0
+
+    # Encode message bits
+    for i in range(n):
+        b = bits[i]
+        inp = (b << (K - 1)) | st
+        o1 = popcount(inp & G1o) & 1
+        o2 = popcount(inp & G2o) & 1
+        out[idx] = o1
+        out[idx + 1] = o2
+        idx += 2
+        # Update state: shift right, insert b at MSB of K-1 bits
+        st = (st >> 1) | (b << (K - 2))
+
+    # Flush (K-1) zero bits
+    for _ in range(K - 1):
+        inp = st  # since b=0, inp = st
+        o1 = popcount(inp & G1o) & 1
+        o2 = popcount(inp & G2o) & 1
+        out[idx] = o1
+        out[idx + 1] = o2
+        idx += 2
+        st = st >> 1  # shift right
+
+    return out
+
+@njit
+def fast_viterbi_decode_nb(coded, msg_len, K, G1o, G2o):
+    """
+    Numba-accelerated hard-decision Viterbi decoder for rate-1/2 conv code.
+    coded: 1D uint8 array of coded bits.
+    msg_len: original message bit length.
+    Returns: 1D uint8 array of decoded bits length = msg_len.
+    """
+    n_states = 1 << (K - 1)
+    # Build trellis
+    next_state = np.zeros((n_states, 2), np.int32)
+    output     = np.zeros((n_states, 2), np.uint8)
+    for st in range(n_states):
+        for b in (0, 1):
+            inp = (b << (K - 1)) | st
+            o1  = popcount(inp & G1o) & 1
+            o2  = popcount(inp & G2o) & 1
+            ns  = ((st >> 1) | (b << (K - 2))) & (n_states - 1)
+            next_state[st, b] = ns
+            output[st, b]     = (o1 << 1) | o2
+
+    n_steps = coded.size // 2
+    INF     = 10**9
+    pm      = np.full(n_states, INF, np.int32)
+    pm[0]   = 0
+    prev    = np.zeros((n_steps, n_states), np.int32)
+
+    # Forward pass
+    for t in range(n_steps):
+        r0 = coded[2*t]
+        r1 = coded[2*t+1]
+        new_pm = np.full(n_states, INF, np.int32)
+        for st in range(n_states):
+            for b in (0, 1):
+                ns   = next_state[st, b]
+                outb = output[st, b]
+                exp0 = (outb >> 1) & 1
+                exp1 = outb & 1
+                metric = pm[st] + (r0 != exp0) + (r1 != exp1)
+                if metric < new_pm[ns]:
+                    new_pm[ns]  = metric
+                    prev[t, ns] = st
+        pm = new_pm
+
+    # Traceback
+    state = 0
+    best  = pm[0]
+    for s in range(1, n_states):
+        if pm[s] < best:
+            best  = pm[s]
+            state = s
+
+    dec = np.empty(n_steps, dtype=np.uint8)
+    for t in range(n_steps - 1, -1, -1):
+        dec[t] = (state >> (K - 2)) & 1
+        state   = prev[t, state]
+
+    return dec[:msg_len]
+
+class ConvCoder:
+    """
+    Numba-backed convolutional coder with matching encode/decode.
+    """
+    def __init__(self, K=7, G1o=0o133, G2o=0o171):
+        self.K    = K
+        self.G1o  = G1o
+        self.G2o  = G2o
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        bits = bits.astype(np.uint8)
+        return fast_conv_encode_nb(bits, self.K, self.G1o, self.G2o)
+
+    def decode(self, coded: np.ndarray, msg_len: int) -> np.ndarray:
+        coded = coded.astype(np.uint8)
+        return fast_viterbi_decode_nb(coded, msg_len, self.K, self.G1o, self.G2o)
 
 class MACSim:
     """
@@ -68,6 +220,7 @@ class MACSim:
     """
     def __init__(self, env, vehicles, symbols_per_packet=100):
         self.env = env
+        self.do_conv = False
         self.vehicles = {v.id: v for v in vehicles}
         self.devices = []
         self.initial_positions = {v.id: v.position.copy() for v in vehicles}
@@ -84,6 +237,9 @@ class MACSim:
         for v in vehicles:
             dev = Device(v.id, env, self)
             self.devices.append(dev)
+            env.timeout(random.randint(1, 15) * 1e-6)
+
+        self.coder = ConvCoder()
 
     def qam_demod(self, rx_syms):
         """Demodulate QAM symbols back to integer indices."""
@@ -140,14 +296,24 @@ class MACSim:
                 sym_time = t + k * symbol_dur
                 h = chan.evolve_to(sym_time)
                 # 1) QAM symbols
-                data_syms = np.random.randint(0, self.mod_order, self.Nfft)
+                if self.do_conv: 
+                    scale = 2 
+                else: 
+                    scale = 1
+                data_bin = np.random.randint(0, 2, self.bits_per_symbol * self.Nfft // scale)
+                if self.do_conv:
+                    data_bin = self.coder.encode(data_bin)
+                # print(data_enc)
+                data_syms = data_bin.reshape(-1, self.bits_per_symbol)
+                powers = 2 ** np.arange(self.bits_per_symbol)[::-1]
+                data_syms = data_syms.dot(powers)
                 mod_syms = phy.qammod(data_syms, self.mod_order)
                 # 2) OFDM TX
                 tx_sig = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
                 # 3) Apply path loss and fading
                 rx_sig = np.sqrt(pl_lin) * h * tx_sig
                 # 4) Impairments: phase noise + AWGN + quantization
-                rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
+                rx_sig = phy.add_awgn(rx_sig, snr_db)
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
                 rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
@@ -155,11 +321,16 @@ class MACSim:
                 rx_eq = rx_syms / h
                 # 6) Demod & count bit errors
                 rx_idx = self.qam_demod(rx_eq)
-                # compute bit-wise errors only over symbols_per_packet bits
-                diff = rx_idx ^ data_syms
-                # count bit errors by popcount over bits_per_symbol bits
-                errs = sum(bin(int(d)).count('1') for d in diff)
-                total_err += errs
+                # print(len(rx_idx))
+                rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
+                # print(rx_bits)
+                # print(self.coder.decode(self.coder.encode(np.array([0,1,0,1,0,1,0,1,0,1])), msg_len=10))
+
+                if self.do_conv:
+                    rx_bits = self.coder.decode(rx_bits, msg_len=self.Nfft * self.bits_per_symbol // 2)
+                # count symbol errors by popcount over bits_per_symbol bits
+                errs = np.sum(data_bin != rx_bits)
+                total_err += errs * self.bits_per_symbol
                 total_bits += self.Nfft * self.bits_per_symbol
             # Compute BER and instantaneous SNR
             ber = total_err / total_bits

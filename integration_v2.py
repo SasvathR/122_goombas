@@ -205,7 +205,7 @@ def simulate_stoplight():
 def basic_simulation():
     vehicles = [Vehicle('A', 0,0,20,0), Vehicle('B',50,20,-10,0), Vehicle('C',100,40,-20,0)]
     env = simpy.Environment()
-    mac = MACSim(env, vehicles, symbols_per_packet=1000)
+    mac = MACSim(env, vehicles, symbols_per_packet=10)
     df = mac.run(until=1.0)
     # --- Print detailed log and summary ---
     print("=== PHY Event Log (first 10 rows) ===")
@@ -216,6 +216,7 @@ def basic_simulation():
         print("=== Average BER per Link ===")
         summary = df.groupby(['tx','rx'])['ber'].mean().reset_index()
         summary.columns = ['TX','RX','Mean_BER']
+    mac.plot_ber_vs_time(df)
 
 if __name__ == '__main__':
     # basic_simulation()

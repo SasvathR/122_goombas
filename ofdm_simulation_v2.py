@@ -131,7 +131,7 @@ def add_awgn(x, snr_db):
     noise = np.sqrt(var/2)*(np.random.randn(*x.shape)+1j*np.random.randn(*x.shape))
     return x+noise
 # replace add_awgn with this version:
-def add_awgn_fixed_noise(sig, snr_db, p_tx=1.0):
+def add_awgn_fixed_noise(sig, snr_db):
     """
     Add AWGN assuming transmit power p_tx and fixed noise floor:
       noise_var = p_tx / snr_lin
