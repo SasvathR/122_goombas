@@ -337,12 +337,14 @@ class MACSim:
                     data_bin = np.concatenate([data_bin, np.zeros(pad_len, dtype=np.uint8)])
                 else:
                     data_bin = data_bin[:required_len]
+                original_bits = data_bin.copy()
 
                 if self.do_conv:
                     data_enc = self.coder.encode(data_bin)
                     data_syms = data_enc.reshape(-1, self.bits_per_symbol)
                 else:
                     data_syms = data_bin.reshape(-1, self.bits_per_symbol)
+
                 powers = 2 ** np.arange(self.bits_per_symbol)[::-1]
                 data_syms = data_syms.dot(powers)
                 mod_syms = phy.qammod(data_syms, self.mod_order)
@@ -365,7 +367,14 @@ class MACSim:
                 # print(self.coder.decode(self.coder.encode(np.array([0,1,0,1,0,1,0,1,0,1])), msg_len=10))
 
                 if self.do_conv:
-                    rx_bits = self.coder.decode(rx_bits, msg_len=self.Nfft * self.bits_per_symbol // 2)
+                    rx_bits = self.coder.decode(rx_bits, msg_len=required_len)
+
+                if k == 0 and rx_id == list(self.vehicles.keys())[1]:  # pick one receiver
+                    mismatch = np.sum(original_bits != rx_bits)
+                    print(f"[DEBUG] TX→RX BSM bit errors: {mismatch} / {required_len}")
+                    print("Original (first 40):", original_bits[:40])
+                    print("Decoded  (first 40):", rx_bits[:40])
+
                 # count symbol errors by popcount over bits_per_symbol bits
                 errs = np.sum(data_bin != rx_bits)
                 total_err += errs * self.bits_per_symbol

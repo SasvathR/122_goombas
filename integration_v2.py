@@ -267,5 +267,5 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-#    simulate_stoplight()
-    simulate_constant_speed()
+    simulate_stoplight()
+    # simulate_constant_speed()
