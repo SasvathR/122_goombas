@@ -137,6 +137,7 @@ def add_awgn_fixed_noise(sig, snr_db, p_tx=1.0):
       noise_var = p_tx / snr_lin
     After fading, rx power = |h|^2 * p_tx, so SNR_rx = |h|^2 × snr_lin
     """
+    p_tx = np.mean(np.abs(sig)**2)
     snr_lin = 10**(snr_db/10)
     noise_var = p_tx / snr_lin
     noise = np.sqrt(noise_var/2) * (
