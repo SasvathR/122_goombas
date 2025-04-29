@@ -150,7 +150,7 @@ def simulate_stoplight():
         Vehicle('V2', 0, -200, 0, 20.0)    # starting at x=-20 m, speed 10 m/s
     ]
     env_sl = simpy.Environment()
-    mac_sl = MACSim(env_sl, vehicles_sl, symbols_per_packet=10)
+    mac_sl = MACSim(env_sl, vehicles_sl, symbols_per_packet=500)
 
     # Stoplight controller process
     def control(env):

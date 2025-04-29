@@ -24,7 +24,6 @@ class Device:
     """
     def __init__(self, id, env, mac):
         self.id = id
-        self.us = 0
         self.n_collision = 0
         self.env = env
         self.mac = mac
@@ -45,12 +44,7 @@ class Device:
     def tick(self):
         """Run every us to update MAC state."""
         while True:
-            yield self.env.timeout(1e-6)
-            if self.us < slot_time:
-                self.us += 1e-6
-                continue
-            else:
-                self.us = 0
+            yield self.env.timeout(slot_time)
             busy = self.mac.channel_busy
             if self.backoff <= 0:
                 if busy:
@@ -59,8 +53,8 @@ class Device:
                     self.start_backoff()
                     continue
                 else:
-                    if self.n_transmit < 0:
-                        continue
+                    # if self.n_transmit < 0:
+                    #     continue
                     # schedule transmission process
                     self.env.process(self.mac.handle_transmission(self.env.now, self.id))
                     self.state = 'IDLE'
@@ -295,7 +289,7 @@ class MACSim:
                         # Compute distance-based path loss (d0 reference)
             pl_lin = (d0/dist)**alpha if dist>0 else 1.0
             # Noise settings
-            snr_db = getattr(phy, 'snr_db', 20)
+            snr_db = getattr(phy, 'snr_db', 10)
             snr_lin = 10**(snr_db / 10)
             # Multiple OFDM symbols
             for k in range(self.symbols_per_packet):
@@ -319,8 +313,8 @@ class MACSim:
                 # 3) Apply path loss and fading
                 rx_sig = np.sqrt(pl_lin) * h * tx_sig
                 # 4) Impairments: phase noise + AWGN + quantization
+                rx_sig = phy.add_awgn(rx_sig, snr_db)
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
-                rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
                 rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
@@ -388,6 +382,7 @@ class MACSim:
         plt.title('BER vs Time')
         plt.xlabel('Time (s)')
         plt.ylabel('BER')
+        plt.yscale('log')
         plt.legend(); plt.grid(True); plt.show()
     
     def plot_snr_vs_time(self, df):
