@@ -131,19 +131,19 @@ def add_awgn(x, snr_db):
     noise = np.sqrt(var/2)*(np.random.randn(*x.shape)+1j*np.random.randn(*x.shape))
     return x+noise
 # replace add_awgn with this version:
-def add_awgn_fixed_noise(sig, snr_db):
+def add_awgn_fixed_noise(tx_sig, snr_db):
     """
     Add AWGN assuming transmit power p_tx and fixed noise floor:
       noise_var = p_tx / snr_lin
     After fading, rx power = |h|^2 * p_tx, so SNR_rx = |h|^2 × snr_lin
     """
-    p_tx = np.mean(np.abs(sig)**2)
+    p_tx = np.mean(np.abs(tx_sig)**2)
     snr_lin = 10**(snr_db/10)
     noise_var = p_tx / snr_lin
     noise = np.sqrt(noise_var/2) * (
-        np.random.randn(*sig.shape) + 1j*np.random.randn(*sig.shape)
+        np.random.randn(*tx_sig.shape) + 1j*np.random.randn(*tx_sig.shape)
     )
-    return sig + noise
+    return tx_sig + noise, noise_var 
 
 def add_phase_noise(x, std):
     return x * np.exp(1j*std*np.random.randn(*x.shape))
@@ -265,7 +265,7 @@ def main():
     # parameters
     Nfft,Ncp,mod_order = 64,16,4
     max_doppler = 30; delays=[0,1e-6,3e-6]; gains_db=[0,-3,-6]
-    fs=1e6; snr_db=20; phi_std=0.01; qbits=10; num_mc=100
+    fs=1e6; snr_db=10; phi_std=0.01; qbits=10; num_mc=100
 
     mse_ls = np.zeros(num_mc); mse_lmmse=np.zeros(num_mc)
     # pick one run for diagnostics

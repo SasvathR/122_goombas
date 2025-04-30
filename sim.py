@@ -350,16 +350,27 @@ class MACSim:
                 mod_syms = phy.qammod(data_syms, self.mod_order)
                 # 2) OFDM TX
                 tx_sig = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
-                # 3) Apply path loss and fading
+
                 rx_sig = np.sqrt(pl_lin) * h * tx_sig
-                # 4) Impairments: phase noise + AWGN + quantization
-                rx_sig = phy.add_awgn(rx_sig, snr_db)
-                rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
+                
+                
+                # 4) Impairments: AWGN
+                rx_sig, noise_var = phy.add_awgn_fixed_noise(tx_sig, snr_db)
+                
+                
+                # 5) Apply path loss and fading
+                
+
+                # 6) Impairments: phase noise + quantization
+
+                rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.0001))
                 # rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
-                # 5) OFDM RX & equalize
+
+
+                # 7) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
-                rx_eq = rx_syms / h
-                # 6) Demod & count bit errors
+                rx_eq = rx_syms / (h * np.sqrt(pl_lin))
+                # 8) Demod & count bit errors
                 rx_idx = self.qam_demod(rx_eq)
                 # print(len(rx_idx))
                 rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
@@ -381,8 +392,9 @@ class MACSim:
                 total_bits += self.Nfft * self.bits_per_symbol
             # Compute BER and instantaneous SNR
             ber = total_err / total_bits
-            inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
-            inst_snr_db = 10 * np.log10(inst_snr_lin) if inst_snr_lin > 0 else -np.inf
+            p_rx = np.mean(np.abs(rx_sig)**2)
+            inst_snr_db  = 10*np.log10(p_rx / noise_var)
+            # 12
             # Log
             self.log.append({
                 'time': t,

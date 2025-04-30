@@ -51,7 +51,7 @@ def test_awgn_benchmark():
     bits = np.random.randint(0, M, Nsym)
     syms = phy.qammod(bits, M)
     for snr_db in [0, 5, 10, 15, 20]:
-        rx = phy.add_awgn_fixed_noise(syms, snr_db)
+        rx = phy.add_awgn(syms, snr_db)
         # simple demodulation by nearest neighbor
         rx_inds = np.array([np.argmin(np.abs(s - syms)) for s in rx])
         ber = np.mean(rx_inds != bits)
