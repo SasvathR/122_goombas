@@ -39,7 +39,7 @@ class Vehicle:
         c (float): Speed of light in m/s.
         last_update (float): Last time (s) the position was updated.
     """
-    def __init__(self, env, id, x, y, vx, vy, ax, ay, l, w, lane, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
+    def __init__(self, env, id, x, y, vx, vy, ax=0.0, ay=0.0, l=5, w=2, lane=0, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
         self.env = env
         self.id = id
         self.position = np.array([x, y], dtype=float)
@@ -90,7 +90,6 @@ class Vehicle:
         
         # Update position history
         self.history.append((t, self.position.copy()))
-        self.position += self.velocity * dt
         self.last_update = t
 
     @property
@@ -279,7 +278,7 @@ def plot_vehicles_gif(env, vehicles):
         rect = Rectangle(
             (v.position[0] - l/2, v.position[1] - w/2),  # bottom-left corner
             l, w,
-            color='red' if v.id == "Firetruck" else 'blue',
+            color='red' if v.id == "Emergency" else 'blue',
             label=v.id,
             zorder = 2
         )
@@ -317,8 +316,7 @@ def plot_vehicles_gif(env, vehicles):
 
     def update(frame):
         target_time = frame * 0.1    
-        while env.now < target_time:
-            env.step()
+        yield env.timeout(target_time - env.now)
         for i, v in enumerate(vehicles):
             l, w = v.size
             rectangles[i].set_xy((v.position[0] - l/2, v.position[1] - w/2))
