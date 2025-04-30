@@ -215,13 +215,16 @@ def simulate_constant_speed():
     print("\n=== Constant Speed Scenario ===")
 
     # Set up two vehicles heading toward x=50 m
-    vehicles_sl = [
-        Vehicle('V1', -200,   0, 20.0, 0),   # starting at x=-200 m, speed 10 m/s
-        Vehicle('V2', -210, 0, 20.0, 0)    # starting at x=-210 m, speed 10 m/s
-    ]
+    
     env_sl = simpy.Environment()
-    mac_sl = MACSim(env_sl, vehicles_sl)
+    
 
+    vehicles_sl = [
+        Vehicle(env_sl, 'V1', -200, 0, 20.0, 0, 0, 0, 5, 2, 0),   # starting at x=-200 m, speed 10 m/s
+        Vehicle(env_sl, 'V2', -210, 0, 20.0, 0, 0, 0, 5, 2, 0)    # starting at x=-210 m, speed 10 m/s
+    ]
+
+    mac_sl = MACSim(env_sl, vehicles_sl)
 
     # Run the simulation
     df_sl = mac_sl.run(until=20.0)
@@ -337,7 +340,6 @@ def simulate_far_fast_moving():
     plt.grid(True)
     plt.show()
 
-
 def basic_simulation():
     vehicles = [Vehicle('A', 0,0,20,0), Vehicle('B',50,20,-10,0), Vehicle('C',100,40,-20,0)]
     env = simpy.Environment()
@@ -354,6 +356,83 @@ def basic_simulation():
         summary.columns = ['TX','RX','Mean_BER']
     mac.plot_ber_vs_time(df)
 
+def simulate_emergency_vehicle():
+    """
+    Stoplight Scenario:
+    - Two vehicles approach an intersection at x=50 m.
+    - Vehicles stop for 3 s (t=5→8 s) and then resume.
+    - Runs the MAC/PHY sim for 10 s, then plots and prints diagnostics.
+    """
+
+    print("\n=== Fire Truck Scenario ===")
+    # Set up two vehicles heading toward x=50 m
+    
+    env_sl = simpy.Environment()
+
+    vehicles_sl = [
+        Vehicle(env_sl, "Firetruck", -300, 0, 40, 0, 0, 0, 12, 2.5, 0),
+        Vehicle(env_sl, "Car1", -200, -2, 20, 0, 0, 0, 5, 2, 2),
+        Vehicle(env_sl, "Car2", -210, -2, 20, 0, 0, 0, 5, 2, 2),
+        Vehicle(env_sl, "Car3", -220, -2, 20, 0, 0, 0, 5, 2, 2),
+        Vehicle(env_sl, "Car4", -230, -2, 20, 0, 0, 0, 5, 2, 2),
+        Vehicle(env_sl, "Car5", -200, 2, 20, 0, 0, 0, 5, 2, 1),
+        Vehicle(env_sl, "Car6", -210, 2, 20, 0, 0, 0, 5, 2, 1),
+        Vehicle(env_sl, "Car7", -220, 2, 20, 0, 0, 0, 5, 2, 1),
+        Vehicle(env_sl, "Car8", -230, 2, 20, 0, 0, 0, 5, 2, 1),
+    ]
+
+    mac_sl = MACSim(env_sl, vehicles_sl)
+
+    # Stoplight controller process
+    def control(env):
+        # At t=10.0 s, turn red: vehicles stop
+        yield env.timeout(10.0)
+        print("Stoplight RED at t=10.0 s")
+        for v in vehicles_sl:
+            if (v.id == 'V1'):
+                v.velocity = np.array([3.0,0])
+            else:
+                v.velocity = np.array([0, 3.0])
+        # At t=30.0 s, turn green: vehicles resume 10 m/s
+        yield env.timeout(4.0)
+        print("Stoplight1 GREEN at t=14.0 s")
+        for v in vehicles_sl:
+            if (v.id == 'V1'):
+                v.velocity = np.array([20.0,0])
+        # At t=30.0 s, turn green: vehicles resume 10 m/s
+        yield env.timeout(4.0)
+        print("Stoplight2 GREEN at t=18.0 s")
+        for v in vehicles_sl:
+            if (v.id == 'V2'):
+                v.velocity = np.array([0,20.0])
+
+
+    env_sl.process(control(env_sl))
+
+    # Run the simulation
+    df_sl = mac_sl.run(until=20.0)
+
+    # Print first few PHY events
+    print("=== PHY Log (Stoplight, first 1000 rows) ===")
+    if df_sl.empty:
+        print("<No events>")
+    else:
+        print(df_sl.head(100).to_string(index=False))
+
+    # Plot trajectories and BER
+    plot_vehicles_enriched(list(mac_sl.vehicles.values()))
+    mac_sl.plot_ber_vs_time(df_sl)
+    mac_sl.plot_snr_vs_time(df_sl)
+
+    # Histogram of per-packet BER
+    plt.figure()
+    plt.hist(df_sl['ber'], bins=20, edgecolor='black')
+    plt.title('Per-Packet BER Histogram (Stoplight)')
+    plt.xlabel('BER')
+    plt.ylabel('Count')
+    plt.grid(True)
+    plt.show()
+
 if __name__ == '__main__':
     # basic_simulation()
     # test_static_channel()
@@ -364,6 +443,7 @@ if __name__ == '__main__':
     # test_reproducibility()
     # test_csma_collision()
     # simulate_stoplight()
-    # simulate_constant_speed()
+    simulate_constant_speed()
     # simulate_emergency()
-    simulate_far_fast_moving()
+    # simulate_far_fast_moving()
+    # simulate_emergency_vehicle()

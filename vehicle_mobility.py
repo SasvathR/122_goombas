@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import numpy as np
 import matplotlib.pyplot as plt
+import simpy
 from scipy.special import j0
 
 BSM_MSG_STRUCT = {
@@ -35,20 +36,34 @@ class Vehicle:
         c (float): Speed of light in m/s.
         last_update (float): Last time (s) the position was updated.
     """
-    def __init__(self, id, x, y, vx, vy, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
+    def __init__(self, env, id, x, y, vx, vy, ax, ay, l, w, lane, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
+        self.env = env
         self.id = id
         self.position = np.array([x, y], dtype=float)
         self.velocity = np.array([vx, vy], dtype=float)
+        self.acceleration = np.array([ax, ay], dtype=float)
+        self.size = np.array([l, w], dtype=float)
+        self.lane = lane
         self.freq = freq
         self.c = c
         self.last_update = 0.0
         self.history = []
+        self.original_acceleration = self.acceleration.copy()
+        self.original_velocity = self.velocity.copy()
+        self.original_position1 = self.position[1].copy()
         self.stop_segments = []  # List of (start, end) tuples
         self.current_stop_start = None
         self._last_speed = np.linalg.norm([vx, vy])
         self.receive_f = receive_f
-
+        self.process = env.process(self.move())
         self.packets_received = 0
+    
+    def move(self):
+        while True:
+            yield self.env.timeout(0.1)
+            self.velocity += self.acceleration * 0.1
+            self.position += self.velocity * 0.1
+            self.history.append((self.env.now, self.position.copy()))
 
     def move_to(self, t):
         dt = t - self.last_update
