@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 import numpy as np
 import matplotlib.pyplot as plt
+import simpy
 from scipy.special import j0
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Rectangle
+from matplotlib.animation import PillowWriter
 
 BSM_MSG_STRUCT = {
     "message_id": 8,
@@ -35,20 +39,34 @@ class Vehicle:
         c (float): Speed of light in m/s.
         last_update (float): Last time (s) the position was updated.
     """
-    def __init__(self, id, x, y, vx, vy, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
+    def __init__(self, env, id, x, y, vx, vy, ax, ay, l, w, lane, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
+        self.env = env
         self.id = id
         self.position = np.array([x, y], dtype=float)
         self.velocity = np.array([vx, vy], dtype=float)
+        self.acceleration = np.array([ax, ay], dtype=float)
+        self.size = np.array([l, w], dtype=float)
+        self.lane = lane
         self.freq = freq
         self.c = c
         self.last_update = 0.0
         self.history = []
+        self.original_acceleration = self.acceleration.copy()
+        self.original_velocity = self.velocity.copy()
+        self.original_position1 = self.position[1].copy()
         self.stop_segments = []  # List of (start, end) tuples
         self.current_stop_start = None
         self._last_speed = np.linalg.norm([vx, vy])
         self.receive_f = receive_f
-
+        self.process = env.process(self.move())
         self.packets_received = 0
+    
+    def move(self):
+        while True:
+            yield self.env.timeout(0.1)
+            self.velocity += self.acceleration * 0.1
+            self.position += self.velocity * 0.1
+            self.history.append((self.env.now, self.position.copy()))
 
     def move_to(self, t):
         dt = t - self.last_update
@@ -205,6 +223,115 @@ class ChannelFading:
         self.last_time = t
         return self.h
 
+def firetruck_broadcast(env_sl, firetruck, vehicles, stop_radius=40):
+        while True:
+            yield env_sl.timeout(0.1)
+            for v in vehicles:
+                if v.id != firetruck.id:
+                    dist = np.linalg.norm(v.position - firetruck.position)
+                    if dist < stop_radius:
+                        v.blinkers = True
+                        if v.lane == 1:                   
+                            if v.position[1] < 4 or v.velocity[0] != 0:
+                                v.acceleration = np.array([-5.5, 0])
+                                v.velocity[1] = 2
+                            if v.position[1] > 6:
+                                v.velocity[1] = 0
+                            if v.velocity[0] == 0:
+                                v.acceleration = v.original_acceleration()
+                        else:
+                            if v.position[1] > -4 or v.velocity[0] != 0:
+                                v.acceleration = np.array([-5.5, 0])
+                                v.velocity[1] = -2
+                            if v.position[1] < -6:
+                                v.velocity[1] = 0
+                            if v.velocity[0] == 0:
+                                v.acceleration = v.original_acceleration()
+                    elif dist > stop_radius + 10:
+                        v.blinkers = False
+                        if v.lane == 1:
+                            if v.position[1] > v.original_position1:
+                                v.velocity[1] = -2
+                            if v.position[1] <= v.original_position1 + 1:
+                                v.velocity[1] = 0
+                            if v.velocity[0] < v.original_velocity[0]:
+                                v.acceleration = np.array([5, 0])
+                            if v.velocity[0] >= v.original_velocity[0]:
+                                v.acceleration = np.array([0, 0])
+                        else:
+                            if abs(v.position[1]) > abs(v.original_position1):
+                                v.velocity[1] = 2
+                            if abs(v.position[1]) <= abs(v.original_position1 - 1):
+                                v.velocity[1] = 0
+                            if v.velocity[0] < v.original_velocity[0]:
+                                v.acceleration = np.array([5, 0])
+                            if v.velocity[0] >= v.original_velocity[0]:
+                                v.acceleration = np.array([0, 0])
+
+
+def plot_vehicles_gif(env, vehicles):
+    fig, ax = plt.subplots()
+    fig.set_size_inches(18.5, 10.5, forward=True)
+    colors = ['red', 'blue', 'green', 'orange']
+    rectangles = []
+    for v in vehicles:
+        l, w = v.size
+        rect = Rectangle(
+            (v.position[0] - l/2, v.position[1] - w/2),  # bottom-left corner
+            l, w,
+            color='red' if v.id == "Firetruck" else 'blue',
+            label=v.id,
+            zorder = 2
+        )
+        ax.add_patch(rect)
+        rectangles.append(rect)
+    ax.set_xlim(-250, 100)
+    ax.set_ylim(-80, 80)
+    ax.set_title('Firetruck Simulation')
+    ax.set_xlabel('X Position (m)')
+    ax.set_ylabel('Y Position (m)')
+    ax.legend()
+
+    ax.plot([-1000, 500], [0, 0], color='white', linestyle='--', linewidth = 2, zorder = 1)
+
+    road_y_center = 0
+    road_height = 16
+    ax.add_patch(Rectangle(
+        (-1000, road_y_center - road_height / 2),  # start x, start y
+        1500,  # road length (adjust to fit simulation)
+        road_height,
+        color='gray',
+        zorder = 0
+    ))
+    #shoulder_y = 10  # half of road height
+    #ax.plot([-1000, 500], [shoulder_y, shoulder_y], color='white', linewidth=2, zorder=1)
+    #ax.plot([-1000, 500], [-shoulder_y, -shoulder_y], color='white', linewidth=2, zorder=1)
+
+
+    for y in [-6, 6]:  # lane boundaries
+        ax.plot([-1000, 500], [y, y], color='yellow', linestyle='--', linewidth=1, zorder=1)
+
+    # Center line (optional)
+    
+    print(vehicles[1].velocity)
+
+    def update(frame):
+        target_time = frame * 0.1    
+        while env.now < target_time:
+            env.step()
+        for i, v in enumerate(vehicles):
+            l, w = v.size
+            rectangles[i].set_xy((v.position[0] - l/2, v.position[1] - w/2))
+        ax.set_title(f"Time: {env.now:.2f}s")
+        return rectangles
+
+
+
+    ani = FuncAnimation(fig, update, frames=200, interval=100, blit=False)
+    writer = PillowWriter(fps=10)
+    ani.save("firetruck_simulation.gif", writer=writer)
+
+    plt.show()
 
 
 def plot_vehicles_old(vehicles, time=None, xlim=(-10, 100), ylim=(-10, 100)):
