@@ -305,12 +305,15 @@ class MACSim:
                 # Simulation parameters
         symbol_dur = getattr(phy, 'SYMBOL_DURATION', 1e-4)
         # Path-loss model reference distance and exponent
-        d0 = getattr(phy, 'REF_DISTANCE', 1.0)      # 1 meter reference
-        alpha = getattr(phy, 'PATHLOSS_EXP', 2.0)    # free-space → 2.0
+        d0 = 1.0      # 1 meter reference
+        alpha = 2.0    # free-space → 2.0
         # Transmit to each receiver
         for rx_id, rx in self.vehicles.items():
             if rx_id == tx_id: continue
             chan = self.fading[(tx_id, rx_id)]
+
+            snr_list = []
+
             total_err = 0
             total_bits = 0
             # Compute distance-based path loss
@@ -319,12 +322,15 @@ class MACSim:
                         # Compute distance-based path loss (d0 reference)
             pl_lin = (d0/dist)**alpha if dist>0 else 1.0
             # Noise settings
-            snr_db = getattr(phy, 'snr_db', 10)
-            snr_lin = 10**(snr_db / 10)
+            snr_db = 20.0
+            snr_lin = 10.0**(snr_db/10.0)
             # Multiple OFDM symbols
+            
             for k in range(self.symbols_per_packet):
+                
                 sym_time = t + k * symbol_dur
                 h = chan.evolve_to(sym_time)
+
                 # 1) QAM symbols
                 if self.do_conv: 
                     scale = 2 
@@ -351,14 +357,25 @@ class MACSim:
                 # 2) OFDM TX
                 tx_sig = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
                 # 3) Apply path loss and fading
-                rx_sig = np.sqrt(pl_lin) * h * tx_sig
+                clean_sig = np.sqrt(pl_lin) * h * tx_sig
+                # rx_sig = np.sqrt(pl_lin) * h * tx_sig
                 # 4) Impairments: phase noise + AWGN + quantization
-                rx_sig = phy.add_awgn(rx_sig, snr_db)
+                # rx_sig = phy.add_awgn_fixed_noise(clean_sig, snr_db)
+                # 4) Impairments: fixed‐noise AWGN from TX reference
+                noise_only = phy.add_awgn_fixed_noise(tx_sig, snr_db) - tx_sig
+                rx_sig     = clean_sig + noise_only
+                # rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.01))
                 # rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
                 # 5) OFDM RX & equalize
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
+                clean_syms = phy.ofdm_receiver(clean_sig, self.Nfft, self.Ncp)
                 rx_eq = rx_syms / h
+
+                sig_pow   = np.mean(np.abs(clean_sig)**2)
+                noise_pow = np.mean(np.abs(rx_sig - clean_sig)**2)
+                snr_list.append(10*np.log10(sig_pow / noise_pow))
+
                 # 6) Demod & count bit errors
                 rx_idx = self.qam_demod(rx_eq)
                 # print(len(rx_idx))
@@ -381,14 +398,37 @@ class MACSim:
                 total_bits += self.Nfft * self.bits_per_symbol
             # Compute BER and instantaneous SNR
             ber = total_err / total_bits
-            inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
-            inst_snr_db = 10 * np.log10(inst_snr_lin) if inst_snr_lin > 0 else -np.inf
+            avg_snr_db = float(np.mean(snr_list))
+            # noise       = rx_sig - clean_sig
+            # signal_pow  = np.mean(np.abs(clean_sig)**2)
+            # noise_pow   = np.mean(np.abs(noise)**2)
+            # inst_snr_lin = signal_pow / noise_pow
+            # inst_snr_db  = 10*np.log10(inst_snr_lin) if noise_pow>0 else -np.inf
+
+            
+
+            # --------------
+
+            # noise       = rx_sig - clean_sig
+            # signal_pow  = np.mean(np.abs(clean_sig)**2)
+            # noise_pow   = np.mean(np.abs(noise)**2)
+
+            # inst_snr_lin = signal_pow / noise_pow
+            # inst_snr_db  = 10*np.log10(inst_snr_lin)
+
+            # --------------    
+
+            # inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
+            # inst_snr_db  = 10*np.log10(inst_snr_lin)
             # Log
+            print(f"⟨pl·|h|²⟩ = {10*np.log10(np.mean(pl_lin * np.abs(h)**2)):.1f} dB")
+            print(f"avg SNR ≈ {snr_db + 10*np.log10(np.mean(pl_lin * np.abs(h)**2)):.1f} dB")
             self.log.append({
                 'time': t,
                 'tx': tx_id,
                 'rx': rx_id,
-                'snr_dB': inst_snr_db,
+                'snr_dB' : avg_snr_db,
+                'snr_list' : snr_list,
                 'ber': ber,
                 'success': ber < 1e-1
             })
@@ -439,6 +479,15 @@ class MACSim:
         plt.figure()
         for rx in df['rx'].unique():
             sub = df[df['rx'] == rx]
-            plt.plot(sub['time'], sub['snr_dB'], label=f'RX {rx}')
+            # plt.plot(sub['time'], sub['snr_dB'], label=f'RX {rx}')
+            # flat, average SNR per packet
+            plt.plot(sub['time'], sub['snr_dB'], '-', label=f'RX {rx} avg')
+
+            # scatter out each symbol's SNR jitter
+            for _, row in sub.iterrows():
+                # time of packet + per-symbol offsets
+                times = row['time'] + np.arange(len(row['snr_list'])) * getattr(phy, 'SYMBOL_DURATION', 1e-4)
+                plt.scatter(times, row['snr_list'], s=5, alpha=0.4)
+            
         plt.title('SNR vs Time')
         plt.xlabel('Time (s)'); plt.ylabel('SNR (dB)'); plt.legend(); plt.grid(True); plt.show()

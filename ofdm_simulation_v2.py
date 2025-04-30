@@ -265,7 +265,7 @@ def main():
     # parameters
     Nfft,Ncp,mod_order = 64,16,4
     max_doppler = 30; delays=[0,1e-6,3e-6]; gains_db=[0,-3,-6]
-    fs=1e6; snr_db=20; phi_std=0.01; qbits=10; num_mc=100
+    fs=1e6; snr_db=15.0; phi_std=0.01; qbits=10; num_mc=100
 
     mse_ls = np.zeros(num_mc); mse_lmmse=np.zeros(num_mc)
     # pick one run for diagnostics
