@@ -238,73 +238,7 @@ def plot_vehicles_old(vehicles, time=None, xlim=(-10, 100), ylim=(-10, 100)):
     plt.legend()
     plt.show()
 
-def plot_vehicles_enriched(vehicles, time=None):
-    plt.figure(figsize=(12, 12))
-    ax = plt.gca()
-    colors = plt.cm.tab10(np.linspace(0, 1, len(vehicles)))
-    
-    for idx, v in enumerate(vehicles):
-        # Plot trajectory with color intensity showing speed history
-        if v.history:
-            times, positions = zip(*v.history)
-            speeds = [np.linalg.norm(v.velocity) for _ in positions]
-            ax.scatter(*zip(*positions), c=speeds, cmap='viridis', 
-                      alpha=0.6, s=10, label=f'{v.id} Speed Heatmap')
 
-        # Current position and velocity
-        current_pos = v.position
-        speed = np.linalg.norm(v.velocity)
-        
-        # Vehicle marker with stop indicators
-        marker_size = 800 if speed < 0.1 else 200 + speed*15
-        ax.scatter(*current_pos, s=marker_size, c=[colors[idx]],
-                  edgecolors='k', zorder=4, marker='s' if speed < 0.1 else 'o')
-
-        # Velocity vector with dynamic scaling
-        if speed > 0.1:
-            ax.quiver(*current_pos, *v.velocity, 
-                     scale=1/(0.05*speed), scale_units='xy',
-                     color=colors[idx], width=0.003, 
-                     headwidth=5, zorder=3)
-
-        # Stop duration visualization
-        if v.stop_segments:
-            for stop in v.stop_segments:
-                if stop['end'] is None:  # Ongoing stop
-                    duration = time - stop['start'] if time else 0
-                else:
-                    duration = stop['end'] - stop['start']
-                if duration > 0:
-                    ax.annotate(
-                        f"⏸️ {duration:.1f}s", 
-                        (current_pos[0], current_pos[1] - 5),
-                        color='red', ha='center', va='top'
-                    )
-
-        # Information panel
-        text_str = (f"🚗 {v.id}\n"
-                    f"Speed: {speed:.1f} m/s\n"
-                    f"Position: ({current_pos[0]:.1f}, {current_pos[1]:.1f})\n"
-                    f"Total stopped: {v.stopped_time:.1f}s")
-        
-        ax.annotate(text_str, current_pos + np.array([5, 5]),
-                   color=colors[idx], fontsize=9, 
-                   bbox=dict(facecolor='white', alpha=0.9))
-
-    # Dynamic axis limits
-    all_positions = np.concatenate([v.position[None] for v in vehicles])
-    buffer = np.max([20, 0.2 * np.ptp(all_positions)])
-    ax.set_xlim(np.min(all_positions[:,0]) - buffer, 
-               np.max(all_positions[:,0]) + buffer)
-    ax.set_ylim(np.min(all_positions[:,1]) - buffer,
-               np.max(all_positions[:,1]) + buffer)
-
-    plt.title(f"Vehicle Dynamics Visualization{' at t='+str(time)+'s' if time else ''}")
-    plt.xlabel("X Position (m)")
-    plt.ylabel("Y Position (m)")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
 
 def plot_vehicles(vehicles, time=None, xlim=(-10, 110), ylim=(-10, 110)):
     """
