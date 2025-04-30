@@ -290,6 +290,53 @@ def simulate_emergency():
     # plt.grid(True)
     # plt.show()
 
+def simulate_far_fast_moving():
+    """
+    Constant Speed Scenario:
+    - Two vehicles moving at a constant speed in the same direction
+    - Runs the MAC/PHY sim for 10 s, then plots and prints diagnostics.
+    """
+    print("\n=== Constant Speed Scenario ===")
+
+    # setattr(phy, 'snr_db', 4)
+    # setattr(phy, 'quant_bits', 6)
+    # setattr(phy, 'phase_noise_std', 0.05)
+
+    # Set up two vehicles heading toward x=50 m
+    vehicles_sl = [
+        Vehicle('V1', 0,   0, 0, 0),   # starting at x=-200 m, speed 10 m/s
+        Vehicle('V2', -1000, 0, 80.0, 0)    # starting at x=-210 m, speed 10 m/s
+    ]
+    env_sl = simpy.Environment()
+    mac_sl = MACSim(env_sl, vehicles_sl)
+
+
+    # Run the simulation
+    df_sl = mac_sl.run(until=20.0)
+
+    # Print first few PHY events
+    print("=== PHY Log (Stoplight, first 1000 rows) ===")
+    if df_sl.empty:
+        print("<No events>")
+    else:
+        print(df_sl.head(100).to_string(index=False))
+
+    # Plot trajectories and BER
+    plot_vehicles_enriched(list(mac_sl.vehicles.values()))
+    mac_sl.plot_ber_vs_time(df_sl)
+    mac_sl.plot_snr_vs_time(df_sl)
+
+    print(vehicles_sl[0].packets_received, vehicles_sl[0].packets_received)
+
+    # Histogram of per-packet BER
+    plt.figure()
+    plt.hist(df_sl['ber'], bins=20, edgecolor='black')
+    plt.title('Per-Packet BER Histogram (Stoplight)')
+    plt.xlabel('BER')
+    plt.ylabel('Count')
+    plt.grid(True)
+    plt.show()
+
 
 def basic_simulation():
     vehicles = [Vehicle('A', 0,0,20,0), Vehicle('B',50,20,-10,0), Vehicle('C',100,40,-20,0)]
@@ -316,6 +363,7 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_stoplight()
+    # simulate_stoplight()
     # simulate_constant_speed()
     # simulate_emergency()
+    simulate_far_fast_moving()
