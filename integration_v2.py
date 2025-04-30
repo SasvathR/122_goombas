@@ -145,41 +145,36 @@ def simulate_stoplight_constellation(
 ):
     """
     Stoplight Scenario:
-    - Two vehicles approach the intersection at (50,0) and (0,50).
+    - Two vehicles approach an intersection at (50,0) and (0,50).
     - They stop (v=0) from t=5→8 s, then resume their original speeds.
-    - We sweep three PA models (pa_a3 in pa_values), run MACSim for ‘duration’,
+    - We sweep three PA models (pa_a3 in pa_values), run MACSim for `duration`,
       then plot trajectories, BER/SNR, and constellations by PA.
     """
     print("\n=== Stoplight Scenario ===")
 
-    # Initial vehicle states
-    # V1 drives East from x=-200→+50 at 10 m/s
-    # V2 drives North from y=-200→+50 at 10 m/s
-    init_vehicles = [
-        lambda env: Vehicle(env, id='V1',
-                            x0=-200, y0=0,
-                            vx=+10.0, vy=0.0,
-                            # rest of constructor args...
-                            ax=0, ay=0, az=0, size_l=5, size_w=2, brake=0),
-        lambda env: Vehicle(env, id='V2',
-                            x0=0, y0=-200,
-                            vx=0.0, vy=+10.0,
-                            ax=0, ay=0, az=0, size_l=5, size_w=2, brake=0)
+    # define initial vehicle parameters
+    veh_params = [
+        ('V1', -200.0,   0.0,  10.0,  0.0),   # id, x, y, vx, vy
+        ('V2',   0.0, -200.0,   0.0, 10.0),
     ]
 
     all_dfs = []
     macs    = []
 
     for pa_a3 in pa_values:
-        # 1) fresh env & fresh vehicle instances
-        env = simpy.Environment()
-        vehicles = [make(env) for make in init_vehicles]
+        # 1) fresh environment & vehicles for this PA model
+        env      = simpy.Environment()
+        vehicles = [
+            Vehicle(env, vid, x, y, vx, vy)
+            for vid, x, y, vx, vy in veh_params
+        ]
 
-        # 2) create MACSim with this PA model
+        # 2) instantiate MACSim with this PA nonlinearity
         mac = MACSim(env, vehicles, pa_a3=pa_a3)
         macs.append(mac)
 
-        # 3) stoplight controller: at t=stop_start, zero velocities; at t+stop_duration, restore
+        # 3) install stoplight controller
+        #    at stop_start: zero velocity; at stop_start+stop_duration: restore
         original_vels = {v.id: v.velocity.copy() for v in vehicles}
         def control(env):
             yield env.timeout(stop_start)
@@ -187,26 +182,28 @@ def simulate_stoplight_constellation(
             for v in vehicles:
                 v.velocity[:] = 0.0
             yield env.timeout(stop_duration)
-            print(f"  → GREEN light at t={stop_start+stop_duration:.1f}s, resuming")
+            green_t = stop_start + stop_duration
+            print(f"  → GREEN light at t={green_t:.1f}s, resuming")
             for v in vehicles:
                 v.velocity[:] = original_vels[v.id]
         env.process(control(env))
 
-        # 4) run the sim
+        # 4) run simulation
         df = mac.run(until=duration)
         df['pa_a3'] = pa_a3
         all_dfs.append(df)
 
-    # 5) concatenate results
+    # 5) merge all runs
     df_all = pd.concat(all_dfs, ignore_index=True)
 
-    # 6) MAC‐level plots (trajectories, BER, SNR) from the first run
+    # 6) MAC-level diagnostics (use the first PA run for trajectories/BER/SNR)
     mac0 = macs[0]
-    mac0.plot_trajectories()
-    mac0.plot_ber_vs_time(df_all[df_all['pa_a3']==pa_values[0]])
-    mac0.plot_snr_vs_time(df_all[df_all['pa_a3']==pa_values[0]])
+    plot_vehicles_gif(env, vehicles)
+    subset0 = df_all[df_all['pa_a3'] == pa_values[0]]
+    mac0.plot_ber_vs_time(subset0)
+    mac0.plot_snr_vs_time(subset0)
 
-    # 7) PA‐vs‐constellation comparison for receiver V1
+    # 7) PHY-level constellations by PA model for RX='V1'
     plot_constellations_by_pa(
         df_all,
         rx_id='V1',
@@ -215,13 +212,11 @@ def simulate_stoplight_constellation(
     )
 
     # 8) summary table of average BER per PA model
-    summary = (
-        df_all
-        .groupby('pa_a3')['ber']
-        .mean()
-        .reset_index()
-        .rename(columns={'ber':'avg_BER'})
-    )
+    summary = (df_all
+               .groupby('pa_a3')['ber']
+               .mean()
+               .reset_index()
+               .rename(columns={'ber':'avg_BER'}))
     print("\nAverage BER by PA model:")
     print(summary.to_string(index=False))
 
