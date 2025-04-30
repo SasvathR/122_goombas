@@ -270,15 +270,15 @@ class MACSim:
             int_to_bits(lon, 32),
             int_to_bits(elev, 16),
             [1],                                 # Accuracy = high
-            int_to_bits(speed, 16),
-            int_to_bits(heading, 16),
-            int_to_bits(ax, 16),
-            int_to_bits(ay, 16),
-            int_to_bits(az, 16),
+            int_to_bits(speed, 16),              # Speed
+            int_to_bits(heading, 16),            # Direction
+            int_to_bits(ax, 16),                 # X Acceleration
+            int_to_bits(ay, 16),                 # Y Acceleration
+            int_to_bits(az, 16),                 # Z Acceleration
             int_to_bits(0, 16),                  # Yaw Rate
             int_to_bits(0, 8),                   # Brake Status
-            int_to_bits(size_l, 16),
-            int_to_bits(size_w, 16),
+            int_to_bits(size_l, 16),             # Length
+            int_to_bits(size_w, 16),             # Width
         ]
         bits = np.array([bit for field in fields for bit in field], dtype=np.uint8)
         return bits
@@ -372,8 +372,8 @@ class MACSim:
                 if k == 0 and rx_id == list(self.vehicles.keys())[1]:  # pick one receiver
                     mismatch = np.sum(original_bits != rx_bits)
                     print(f"[DEBUG] TX→RX BSM bit errors: {mismatch} / {required_len}")
-                    print("Original (first 40):", original_bits[:40])
-                    print("Decoded  (first 40):", rx_bits[:40])
+                    print("Original:", original_bits[:256])
+                    print("Decoded :", rx_bits[:256])
 
                 # count symbol errors by popcount over bits_per_symbol bits
                 errs = np.sum(data_bin != rx_bits)
