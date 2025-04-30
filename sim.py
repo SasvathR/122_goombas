@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 from vehicle_mobility import ChannelFading
 import ofdm_simulation_v2 as phy  # existing OFDM simulation module
 from numba import njit
+import zlib
+from math import ceil
 
 # CSMA-CA parameters
 difs_slots = 2.5      # DIFS in slot units
@@ -13,21 +15,60 @@ slot_time = getattr(phy, 'SLOT_TIME', 20e-6)  # 50 μs slot default
 cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
 
+def int_to_bits(x, width):
+    return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
+
+def compute_fcs_from_bits(bit_array: list[int]) -> list[int]:
+    # Pad bit array to make it a multiple of 8
+    if len(bit_array) % 8 != 0:
+        padding = 8 - (len(bit_array) % 8)
+        bit_array += [0] * padding
+
+    # Pack bits into bytes (LSB-first per byte)
+    byte_array = bytearray()
+    for i in range(0, len(bit_array), 8):
+        byte = sum((bit_array[i + j] << j) for j in range(8))
+        byte_array.append(byte)
+
+    # Compute CRC32 with standard 802.11 parameters
+    crc = zlib.crc32(byte_array) ^ 0xFFFFFFFF
+    crc_bytes = crc.to_bytes(4, byteorder='little')
+
+    # Convert CRC bytes to bit array (LSB-first per byte)
+    fcs_bits = []
+    for byte in crc_bytes:
+        fcs_bits.extend([(byte >> i) & 1 for i in range(8)])
+
+    return fcs_bits
+
+def generate_mac():
+    mac = [0x02,               # Locally administered, unicast
+           random.randint(0x00, 0x7f),
+           random.randint(0x00, 0xff),
+           random.randint(0x00, 0xff),
+           random.randint(0x00, 0xff),
+           random.randint(0x00, 0xff)]
+    return sum([mac[i] << ((5 - i) * 8) for i in range(len(mac))])
+
 class Device:
     """
     MAC-layer device implementing simplified CSMA-CA.
     States: IDLE -> DIFS -> BACKOFF -> TRANSMIT -> IDLE
     """
-    def __init__(self, id, env, mac):
-        self.id = id
+    def __init__(self, v, env, mac, transmission_interval):
+        self.vehicle = v
         self.n_collision = 0
+        self.mac_addr = generate_mac()
         self.env = env
         self.mac = mac
         self.state = 'IDLE'
         self.difs = difs_slots
         self.backoff = 0
         env.process(self.tick())  # start FSM
-        self.n_transmit = 1e2
+        self.t_int = transmission_interval
+        self.next_transmit = self.env.now + self.t_int
+
+        self.frag_num = 0
 
     def start_difs(self):
         self.state = 'DIFS'
@@ -40,7 +81,10 @@ class Device:
     def tick(self):
         """Run every us to update MAC state."""
         while True:
-            yield self.env.timeout(slot_time)
+            if self.env.now < self.next_transmit and self.backoff <= 0:
+                yield self.env.timeout(self.next_transmit - self.env.now)
+            else:
+                yield self.env.timeout(slot_time)
             busy = self.mac.channel_busy
             if self.backoff <= 0:
                 if busy:
@@ -49,13 +93,27 @@ class Device:
                     self.start_backoff()
                     continue
                 else:
-                    # if self.n_transmit < 0:
-                    #     continue
-                    # schedule transmission process
-                    self.env.process(self.mac.handle_transmission(self.env.now, self.id))
+                    # start transmission
+                    # 387 bits message, length is 39u
+                    msg = self.vehicle.generate_bsm(self.env.now)
+                    l = int(np.ceil((len(msg) + 98) / 10))
+                    data = [
+                        int_to_bits(0x0888, 16), # Frame Control
+                        int_to_bits(l, 16), # Duration
+                        int_to_bits(0x01005E7FFFFA, 6), # Reciever, broadcast
+                        int_to_bits(self.mac_addr, 6), # Transmitter
+                        int_to_bits(0xFFFFFFFFFFFF, 6), # BSSID
+                        int_to_bits(self.frag_num, 16), # Seq #
+                        msg # data
+                    ]
+                    bits = [int(bit) for field in data for bit in field]
+                    bits += compute_fcs_from_bits(bits)
+                    self.env.process(self.mac.handle_transmission(self.env.now, self.vehicle.id, bits))
                     self.state = 'IDLE'
                     self.n_collision = 0
-                    self.n_transmit -= 1
+                    self.next_transmit = self.env.now + self.t_int
+                    self.frag_num += 1
+
             if self.state == 'IDLE' and not busy:
                 self.start_difs()
             elif self.state == 'DIFS':
@@ -67,21 +125,6 @@ class Device:
                         self.start_backoff()
             elif self.state == 'BACKOFF' and not busy:
                 self.backoff -= 1
-
-class ConvCoder:
-    def __init__(self, K=7, G1o=0o133, G2o=0o171):
-        self.K = K
-        self.G1o = G1o
-        self.G2o = G2o
-        self.n_states = 1 << (K - 1)
-        self.G1 = np.array([(G1o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
-        self.G2 = np.array([(G2o >> i) & 1 for i in range(K - 1, -1, -1)], dtype=np.uint8)[::-1]
-
-    def encode(self, bits: np.ndarray) -> np.ndarray:
-        return fast_conv_encode_nb(bits, self.K, self.G1o, self.G2o)
-
-    def decode(self, coded: np.ndarray, msg_len: int) -> np.ndarray:
-        return fast_viterbi_decode_nb(coded, msg_len, self.K, self.G1o, self.G2o)
 
 
 @njit
@@ -214,7 +257,7 @@ class MACSim:
       - Generate multiple OFDM symbols per transmission
       - Compute true BER by bit comparison
     """
-    def __init__(self, env, vehicles, symbols_per_packet=100):
+    def __init__(self, env, vehicles):
         self.env = env
         self.do_conv = True
         self.vehicles = {v.id: v for v in vehicles}
@@ -228,12 +271,11 @@ class MACSim:
         self.Ncp  = getattr(phy, 'Ncp', 16)
         self.mod_order = getattr(phy, 'mod_order', 4)
         self.bits_per_symbol = int(np.log2(self.mod_order))
-        self.symbols_per_packet = symbols_per_packet
         # instantiate MAC devices
         for v in vehicles:
-            dev = Device(v.id, env, self)
+            dev = Device(v, env, self, 0.1)
             self.devices.append(dev)
-            env.timeout(random.randint(1, 15) * 1e-6)
+            env.timeout(random.randint(1, 50) * 1e-3)
 
         self.coder = ConvCoder()
 
@@ -249,42 +291,9 @@ class MACSim:
         real_idx = re_idx.round().astype(int)
         imag_idx = im_idx.round().astype(int)
         return (imag_idx * m + real_idx).astype(int)
-    
-    def generate_bsm(self, vehicle, t):
-        """Generate a binary BSM message from vehicle state."""
-        def int_to_bits(x, width):
-            return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
-
-        lat = int(37.7749 * 1e7)
-        lon = int(-122.4194 * 1e7)
-        elev = int(15)
-        speed = int(np.linalg.norm(vehicle.velocity) * 100)
-        heading = int(np.degrees(np.arctan2(vehicle.velocity[1], vehicle.velocity[0])) * 100) % 36000
-        ax, ay, az = [int(x * 1000) for x in [0.5, 0.0, -9.8]]
-        size_l, size_w = int(4.5 * 100), int(1.8 * 100)
-        fields = [
-            int_to_bits(0x20, 8),                # Message ID
-            int_to_bits(0x3F29A78B, 32),         # Temporary ID
-            int_to_bits(int(t * 1000), 32),      # Timestamp in ms
-            int_to_bits(lat, 32),
-            int_to_bits(lon, 32),
-            int_to_bits(elev, 16),
-            [1],                                 # Accuracy = high
-            int_to_bits(speed, 16),              # Speed
-            int_to_bits(heading, 16),            # Direction
-            int_to_bits(ax, 16),                 # X Acceleration
-            int_to_bits(ay, 16),                 # Y Acceleration
-            int_to_bits(az, 16),                 # Z Acceleration
-            int_to_bits(0, 16),                  # Yaw Rate
-            int_to_bits(0, 8),                   # Brake Status
-            int_to_bits(size_l, 16),             # Length
-            int_to_bits(size_w, 16),             # Width
-        ]
-        bits = np.array([bit for field in fields for bit in field], dtype=np.uint8)
-        return bits
 
 
-    def handle_transmission(self, t, tx_id):
+    def handle_transmission(self, t, tx_id, bits):
         """
         Called when a device's backoff expires (packet transmission).
         Applies distance-based path loss, small-scale fading, and fixed-noise AWGN.
@@ -303,11 +312,16 @@ class MACSim:
                 self.fading[key] = ChannelFading(f_max=f_d, init_time=t)
             self.fading[key].f_max = f_d
                 # Simulation parameters
-        symbol_dur = getattr(phy, 'SYMBOL_DURATION', 1e-4)
+        symbol_dur = getattr(phy, 'SYMBOL_DURATION', 64e-7)
         # Path-loss model reference distance and exponent
         d0 = getattr(phy, 'REF_DISTANCE', 1.0)      # 1 meter reference
         alpha = getattr(phy, 'PATHLOSS_EXP', 2.0)    # free-space → 2.0
         # Transmit to each receiver
+        if self.do_conv: 
+            scale = 2 
+        else: 
+            scale = 1
+        num_packets = ceil(len(bits) / (self.Nfft * self.bits_per_symbol // scale))
         for rx_id, rx in self.vehicles.items():
             if rx_id == tx_id: continue
             chan = self.fading[(tx_id, rx_id)]
@@ -322,22 +336,18 @@ class MACSim:
             snr_db = getattr(phy, 'snr_db', 10)
             snr_lin = 10**(snr_db / 10)
             # Multiple OFDM symbols
-            for k in range(self.symbols_per_packet):
+            all_bits = []
+            for k in range(num_packets):
                 sym_time = t + k * symbol_dur
                 h = chan.evolve_to(sym_time)
                 # 1) QAM symbols
-                if self.do_conv: 
-                    scale = 2 
-                else: 
-                    scale = 1
-                data_bin = self.generate_bsm(tx, sym_time)
+                data_bin = np.array(bits[k * self.bits_per_symbol * self.Nfft // scale: (k+1) * self.bits_per_symbol * self.Nfft // scale])
                 required_len = self.bits_per_symbol * self.Nfft // scale
                 if len(data_bin) < required_len:
                     pad_len = required_len - len(data_bin)
                     data_bin = np.concatenate([data_bin, np.zeros(pad_len, dtype=np.uint8)])
                 else:
                     data_bin = data_bin[:required_len]
-                original_bits = data_bin.copy()
 
                 if self.do_conv:
                     data_enc = self.coder.encode(data_bin)
@@ -363,22 +373,22 @@ class MACSim:
                 rx_idx = self.qam_demod(rx_eq)
                 # print(len(rx_idx))
                 rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
-                # print(rx_bits)
-                # print(self.coder.decode(self.coder.encode(np.array([0,1,0,1,0,1,0,1,0,1])), msg_len=10))
 
                 if self.do_conv:
                     rx_bits = self.coder.decode(rx_bits, msg_len=required_len)
 
-                if k == 0 and rx_id == list(self.vehicles.keys())[1]:  # pick one receiver
-                    mismatch = np.sum(original_bits != rx_bits)
-                    print(f"[DEBUG] TX→RX BSM bit errors: {mismatch} / {required_len}")
-                    print("Original:", original_bits[:256])
-                    print("Decoded :", rx_bits[:256])
+                all_bits += [int(b) for b in rx_bits]
 
                 # count symbol errors by popcount over bits_per_symbol bits
                 errs = np.sum(data_bin != rx_bits)
                 total_err += errs * self.bits_per_symbol
                 total_bits += self.Nfft * self.bits_per_symbol
+
+            all_bits = all_bits[:len(bits)]
+            data = all_bits[0:-32]
+            fcs = compute_fcs_from_bits(data)
+            if fcs == all_bits[-32:]:
+                rx.receive_bsm(data[66:-4])
             # Compute BER and instantaneous SNR
             ber = total_err / total_bits
             inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
@@ -393,7 +403,7 @@ class MACSim:
                 'success': ber < 1e-1
             })
         # Release channel after packet
-        yield self.env.timeout(self.symbols_per_packet * symbol_dur)
+        yield self.env.timeout(symbol_dur * num_packets)
         self.channel_busy = False
 
     def run(self, until):

@@ -3,6 +3,26 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.special import j0
 
+BSM_MSG_STRUCT = {
+    "message_id": 8,
+    "temporary_id": 32,
+    "timestamp": 32,
+    "lat": 32,
+    "lon": 32,
+    "elev": 32,
+    "accuracy": 1,
+    "speed": 16,
+    "direction": 16,
+    "ax": 16,
+    "ay": 16,
+    "az": 16,
+    "yaw_rate": 16,
+    "brake_status": 8,
+    "length": 16,
+    "width": 16,
+    "emergency": 1
+}
+
 class Vehicle:
     """
     Represents a vehicle in 2D space with constant velocity.
@@ -15,7 +35,7 @@ class Vehicle:
         c (float): Speed of light in m/s.
         last_update (float): Last time (s) the position was updated.
     """
-    def __init__(self, id, x, y, vx, vy, freq=5.9e9, c=3e8):
+    def __init__(self, id, x, y, vx, vy, freq=5.9e9, c=3e8, receive_f=lambda a, b: a):
         self.id = id
         self.position = np.array([x, y], dtype=float)
         self.velocity = np.array([vx, vy], dtype=float)
@@ -26,6 +46,9 @@ class Vehicle:
         self.stop_segments = []  # List of (start, end) tuples
         self.current_stop_start = None
         self._last_speed = np.linalg.norm([vx, vy])
+        self.receive_f = receive_f
+
+        self.packets_received = 0
 
     def move_to(self, t):
         dt = t - self.last_update
@@ -82,6 +105,56 @@ class Vehicle:
         # Relative velocity (projected)
         rel_vel = np.dot(transmitter.velocity - self.velocity, direction)
         return (rel_vel / self.c) * self.freq
+    
+    def generate_bsm(self, t):
+        """Generate a binary BSM message from vehicle state."""
+        def int_to_bits(x, width):
+            return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
+
+        lat = int(self.position[0] * 1e7)
+        lon = int(self.position[1] * 1e7)
+        elev = int(15)
+        speed = int(np.linalg.norm(self.velocity) * 100)
+        heading = int(np.degrees(np.arctan2(self.velocity[1], self.velocity[0])) * 100) % 36000
+        ax, ay, az = [int(x * 1000) for x in [0.5, 0.0, -9.8]]
+        size_l, size_w = int(4.5 * 100), int(1.8 * 100)
+        enriched_data = {
+            "message_id": 0x20,
+            "temporary_id": 0x3F29A78B,
+            "timestamp": int(t * 1000),
+            "lat": lat,
+            "lon": lon,
+            "elev": elev,
+            "accuracy": 1,
+            "speed": speed,
+            "direction": heading,
+            "ax": ax,
+            "ay": ay,
+            "az": az,
+            "yaw_rate": 0,
+            "brake_status": 0,
+            "length": size_l,
+            "width": size_w,
+            "emergency": int(self.id == "Emergency")
+        }
+        # print("in", enriched_data)
+        fields = [int_to_bits(enriched_data[k1], BSM_MSG_STRUCT[k2]) for k1, k2 in zip(enriched_data, BSM_MSG_STRUCT)]
+        bits = np.array([bit for field in fields for bit in field], dtype=np.uint8)
+        return bits
+    
+    def receive_bsm(self, bits):
+        def bits_to_int(bits: list[int]) -> int:
+            return sum(bit << (len(bits) - 1 - i) for i, bit in enumerate(bits))
+        enriched_data = {}
+        c = 0
+        for field, data in BSM_MSG_STRUCT.items():
+            enriched_data[field] = bits_to_int(bits[c: c+data])
+            c += data
+        # print("out", enriched_data)
+        self.receive_f(self, enriched_data)
+        self.packets_received += 1
+        return
+
 
     def __repr__(self):
         return (f"Vehicle(id={self.id}, pos={self.position.tolist()}, "
