@@ -1,11 +1,12 @@
 import numpy as np
+import pandas as pd
 import random
 import simpy
 import matplotlib.pyplot as plt
 import ofdm_simulation_v3 as phy  # existing OFDM simulation module
 from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched, plot_vehicles_gif, firetruck_broadcast
 from sim import MACSim
-from sim import plot_pa_evm, plot_constellations
+from sim import plot_pa_evm, plot_constellations, plot_constellations_by_pa
 from scipy.special import erfc
 
 # === Validation & Testing Suite ===
@@ -136,82 +137,95 @@ def test_csma_collision():
     unique = len(times)==len(np.unique(times))
     print(f"No simultaneous tx? {unique}")
 
-def simulate_stoplight():
+def simulate_stoplight_constellation(
+    duration       = 10.0,          # total sim time [s]
+    stop_start     = 5.0,           # when the light turns red
+    stop_duration  = 3.0,           # how long vehicles sit
+    pa_values      = [0.0, 0.1, 0.5] # cubic‐term coefficients to sweep
+):
     """
     Stoplight Scenario:
-    - Two vehicles approach an intersection at x=50 m.
-    - Vehicles stop for 3 s (t=5→8 s) and then resume.
-    - Runs the MAC/PHY sim for 10 s, then plots and prints diagnostics.
+    - Two vehicles approach the intersection at (50,0) and (0,50).
+    - They stop (v=0) from t=5→8 s, then resume their original speeds.
+    - We sweep three PA models (pa_a3 in pa_values), run MACSim for ‘duration’,
+      then plot trajectories, BER/SNR, and constellations by PA.
     """
     print("\n=== Stoplight Scenario ===")
-    
-    env_sl = simpy.Environment()
-    # Set up two vehicles heading toward x=50 m
-    
-    vehicles_sl = [
-        Vehicle(env_sl, 'V1', -200, 0, 20.0, 0, 0, 0, 5, 2, 0),
-        Vehicle(env_sl, 'V2', -200, -200, 0, 20.0, 0, 0, 5, 2, 0)  # starting at x=-20 m, speed 10 m/s
+
+    # Initial vehicle states
+    # V1 drives East from x=-200→+50 at 10 m/s
+    # V2 drives North from y=-200→+50 at 10 m/s
+    init_vehicles = [
+        lambda env: Vehicle(env, id='V1',
+                            x0=-200, y0=0,
+                            vx=+10.0, vy=0.0,
+                            # rest of constructor args...
+                            ax=0, ay=0, az=0, size_l=5, size_w=2, brake=0),
+        lambda env: Vehicle(env, id='V2',
+                            x0=0, y0=-200,
+                            vx=0.0, vy=+10.0,
+                            ax=0, ay=0, az=0, size_l=5, size_w=2, brake=0)
     ]
-    
-    mac_sl = MACSim(env_sl, vehicles_sl)
 
-    # setattr(phy, 'snr_db', 20)
-    # setattr(phy, 'quant_bits', 6)
-    # setattr(phy, 'phase_noise_std', 0.01)
+    all_dfs = []
+    macs    = []
 
-    # Stoplight controller process
-    def control(env):
-        # At t=10.0 s, turn red: vehicles stop
-        yield env.timeout(10.0)
-        print("Stoplight RED at t=10.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V1'):
-                v.velocity = np.array([3.0,0])
-            else:
-                v.velocity = np.array([0, 3.0])
-        # At t=30.0 s, turn green: vehicles resume 10 m/s
-        yield env.timeout(4.0)
-        print("Stoplight1 GREEN at t=14.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V1'):
-                v.velocity = np.array([20.0,0])
-        # At t=30.0 s, turn green: vehicles resume 10 m/s
-        yield env.timeout(4.0)
-        print("Stoplight2 GREEN at t=18.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V2'):
-                v.velocity = np.array([0,20.0])
+    for pa_a3 in pa_values:
+        # 1) fresh env & fresh vehicle instances
+        env = simpy.Environment()
+        vehicles = [make(env) for make in init_vehicles]
 
+        # 2) create MACSim with this PA model
+        mac = MACSim(env, vehicles, pa_a3=pa_a3)
+        macs.append(mac)
 
-    env_sl.process(control(env_sl))
+        # 3) stoplight controller: at t=stop_start, zero velocities; at t+stop_duration, restore
+        original_vels = {v.id: v.velocity.copy() for v in vehicles}
+        def control(env):
+            yield env.timeout(stop_start)
+            print(f"  → RED light at t={stop_start:.1f}s, stopping vehicles")
+            for v in vehicles:
+                v.velocity[:] = 0.0
+            yield env.timeout(stop_duration)
+            print(f"  → GREEN light at t={stop_start+stop_duration:.1f}s, resuming")
+            for v in vehicles:
+                v.velocity[:] = original_vels[v.id]
+        env.process(control(env))
 
-    # Run the simulation
-    df_sl = mac_sl.run(until=20.0)
+        # 4) run the sim
+        df = mac.run(until=duration)
+        df['pa_a3'] = pa_a3
+        all_dfs.append(df)
 
-    # Print first few PHY events
-    print("=== PHY Log (Stoplight, first 1000 rows) ===")
-    if df_sl.empty:
-        print("<No events>")
-    else:
-        print(df_sl.head(100).to_string(index=False))
+    # 5) concatenate results
+    df_all = pd.concat(all_dfs, ignore_index=True)
 
-    # Plot trajectories and BER
-    plot_vehicles_enriched(list(mac_sl.vehicles.values()))
-    mac_sl.plot_ber_vs_time(df_sl)
-    mac_sl.plot_snr_vs_time(df_sl)
+    # 6) MAC‐level plots (trajectories, BER, SNR) from the first run
+    mac0 = macs[0]
+    mac0.plot_trajectories()
+    mac0.plot_ber_vs_time(df_all[df_all['pa_a3']==pa_values[0]])
+    mac0.plot_snr_vs_time(df_all[df_all['pa_a3']==pa_values[0]])
 
+    # 7) PA‐vs‐constellation comparison for receiver V1
+    plot_constellations_by_pa(
+        df_all,
+        rx_id='V1',
+        pa_values=pa_values,
+        max_plots=4
+    )
 
-    print("got here")
-    plot_constellations(df_sl, rx_id=1, max_plots=4)
-    print("but not here")
-    # Histogram of per-packet BER
-    plt.figure()
-    plt.hist(df_sl['ber'], bins=20, edgecolor='black')
-    plt.title('Per-Packet BER Histogram (Stoplight)')
-    plt.xlabel('BER')
-    plt.ylabel('Count')
-    plt.grid(True)
-    plt.show()
+    # 8) summary table of average BER per PA model
+    summary = (
+        df_all
+        .groupby('pa_a3')['ber']
+        .mean()
+        .reset_index()
+        .rename(columns={'ber':'avg_BER'})
+    )
+    print("\nAverage BER by PA model:")
+    print(summary.to_string(index=False))
+
+    return df_all
 
 def simulate_constant_speed():
     """
@@ -430,10 +444,10 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_stoplight()
+    simulate_stoplight_constellation()
     # plot_pa_evm(Nfft=64, Ncp=16, mod_order=4)
 
     # simulate_constant_speed()
     # simulate_emergency()
     # simulate_far_fast_moving()
-    simulate_emergency_vehicle()
+    # simulate_emergency_vehicle()

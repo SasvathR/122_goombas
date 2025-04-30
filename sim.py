@@ -14,8 +14,10 @@ import time
 Ptx_dBm     = 12.0                           # transmit power [dBm]
 Ptx_W       = 10**((Ptx_dBm-30)/10)          # → [W]
 quant_bits  = [8, 12]                        # test 8-bit & 12-bit quantizers
-pn_std_list = [0.0, getattr(phy,'phase_noise_std',0.05)]  
+pn_std_list = [0.0, 0.01, 0.025, 0.05]  
                                             # no PN vs your std 
+
+phase_noise_default = 0.01
 
 # CSMA-CA parameters
 difs_slots = 2.5      # DIFS in slot units
@@ -24,6 +26,26 @@ cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
 
 symbol_dur = getattr(phy, 'SYMBOL_DURATION', 64e-7)
+
+
+# constants (e.g. at top of your file or inside __init__)
+c   = 3e8                    # speed of light [m/s]
+fc  = 5.9e9                  # carrier frequency [Hz] (DSRC band)
+lam = c / fc                 # wavelength [m]
+d0  = 1.0                    # reference distance [m]
+alpha = 2.0                  # free-space exponent
+
+k_B   = 1.38e-23       # Boltzmann’s constant
+T0    = 290            # room temperature [K]
+B     = 10e6           # DSRC channel bandwidth [Hz]
+nf_dB = 5.0
+noise_var = k_B*T0*B * (10**(nf_dB/10))   # total noise power in 10 MHz
+
+Ptx_dBm = 25.0                          # choose your module’s typical output
+Ptx_W   = 10**((Ptx_dBm-30)/10)         # convert dBm→watts
+
+# precompute FSPL at d0
+fspl_d0 = (lam / (4*np.pi*d0))**2
 
 PA_models   = [
     ("Ideal",    0.00),
@@ -80,6 +102,38 @@ def plot_constellations(df, rx_id=None, max_plots=4):
             ax.legend(loc='upper right')
     plt.tight_layout()
     plt.show()
+
+def plot_constellations_by_pa(df, rx_id=None, pa_values=None, max_plots=3):
+    """
+    For each pa_a3 in pa_values, plot up to max_plots constellations
+    (ideal vs received) at the same time, so you can compare how increasing
+    nonlinearity warps the clusters.
+    """
+    if pa_values is None:
+        pa_values = sorted(df['pa_a3'].unique())
+
+    fig, axes = plt.subplots(len(pa_values), max_plots,
+                             figsize=(4*max_plots,4*len(pa_values)),
+                             squeeze=False)
+
+    for i, a3 in enumerate(pa_values):
+        sub = df[df['pa_a3']==a3]
+        if rx_id is not None:
+            sub = sub[sub['rx']==rx_id]
+        sub = sub.nsmallest(max_plots, 'time')
+        for j, (_, row) in enumerate(sub.iterrows()):
+            ax = axes[i][j]
+            tx = row['tx_syms']; rx = row['rx_syms']
+            ax.scatter(rx.real, rx.imag, s=20, alpha=0.6, label='Rx')
+            ax.scatter(tx.real, tx.imag, marker='x', c='r', label='Tx')
+            ax.set_title(f"a3={a3:.3f}\ntime={row['time']:.3f}s\nSNR={row['snr_dB']:.1f} dB")
+            ax.axis('equal'); ax.grid(True)
+            if i==0 and j==0:
+                ax.legend(loc='upper right')
+    fig.suptitle(f"Constellations for Rx={rx_id}, varying PA nonlinearity", y=1.02)
+    plt.tight_layout()
+    plt.show()
+
 
 def prbs_seq(degree, length):
     """Max-length PRBS for payload generation."""
@@ -204,25 +258,6 @@ def generate_mac():
            random.randint(0x00, 0xff),
            random.randint(0x00, 0xff)]
     return sum([mac[i] << ((5 - i) * 8) for i in range(len(mac))])
-
-# constants (e.g. at top of your file or inside __init__)
-c   = 3e8                    # speed of light [m/s]
-fc  = 5.9e9                  # carrier frequency [Hz] (DSRC band)
-lam = c / fc                 # wavelength [m]
-d0  = 1.0                    # reference distance [m]
-alpha = 2.0                  # free-space exponent
-
-k_B   = 1.38e-23       # Boltzmann’s constant
-T0    = 290            # room temperature [K]
-B     = 10e3           # DSRC channel bandwidth [Hz]
-nf_dB = 5.0
-noise_var = k_B*T0*B * (10**(nf_dB/10))   # total noise power in 10 MHz
-
-Ptx_dBm = 0.0                          # choose your module’s typical output
-Ptx_W   = 10**((Ptx_dBm-30)/10)         # convert dBm→watts
-
-# precompute FSPL at d0
-fspl_d0 = (lam / (4*np.pi*d0))**2
 
 class Device:
     """
@@ -431,7 +466,7 @@ class MACSim:
       - Generate multiple OFDM symbols per transmission
       - Compute true BER by bit comparison
     """
-    def __init__(self, env, vehicles):
+    def __init__(self, env, vehicles, pa_a3=0.0):
         self.env = env
         self.do_conv = True
         self.vehicles = {v.id: v for v in vehicles}
@@ -445,6 +480,7 @@ class MACSim:
         self.Ncp  = getattr(phy, 'Ncp', 16)
         self.mod_order = getattr(phy, 'mod_order', 4)
         self.bits_per_symbol = int(np.log2(self.mod_order))
+        self.pa_a3 = pa_a3   # cubic‐term coefficient for this run
         # instantiate MAC devices
         for v in vehicles:
             dev = Device(v, env, self, 0.1)
@@ -540,7 +576,12 @@ class MACSim:
                 data_syms = data_syms.dot(powers)
                 mod_syms = phy.qammod(data_syms, self.mod_order)
                 # 2) OFDM TX
+                # 2a) generate and normalize the OFDM burst
                 tx_sig = phy.ofdm_transmitter(mod_syms, self.Nfft, self.Ncp)
+                # undo the IFFT’s √Nfft gain so “unit power” really means unit power
+                tx_sig /= np.sqrt(self.Nfft)
+
+                tx_sig = pa_nonlinear(tx_sig, 1.0, self.pa_a3)
 
                 
                 # normalize the OFDM burst to unit power, then scale to Ptx:
@@ -549,17 +590,17 @@ class MACSim:
                 # 3) Apply path loss and fading
                 clean_sig = np.sqrt(pl_lin) * h * tx_sig
 
-                # instantaneous Rx power (Watts)
-                Prx_lin = np.mean(np.abs(clean_sig)**2)
+                # # instantaneous Rx power (Watts)
+                # Prx_lin = np.mean(np.abs(clean_sig)**2)
 
-                # convert to dBm
-                Prx_dBm = 10*np.log10(Prx_lin) + 30
-                noise_dBm = 10*np.log10(noise_var) + 30
-                # print(f"  → Prx = {Prx_dBm:.1f} dBm, noise = {noise_dBm:.1f} dBm, SNR ≈ {Prx_dBm - noise_dBm:.1f} dB")
+                # # convert to dBm
+                # Prx_dBm = 10*np.log10(Prx_lin) + 30
+                # noise_dBm = 10*np.log10(noise_var) + 30
+                # # print(f"  → Prx = {Prx_dBm:.1f} dBm, noise = {noise_dBm:.1f} dBm, SNR ≈ {Prx_dBm - noise_dBm:.1f} dB")
 
 
                 rx_sig = add_awgn_integrated(clean_sig)
-                rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.3))
+                rx_sig = phy.add_phase_noise(rx_sig, phase_noise_default)
 
                 # quantization only degrades at like 4 or 2 bits
                 rx_sig = phy.add_quantization_noise(rx_sig, 12)
@@ -621,6 +662,7 @@ class MACSim:
             'rx'          : rx_id,                                # receiver ID
             'distance_m'  : dist,                                # link distance [m]
             'path_loss'   : pl_lin,                              # linear path‐loss
+            'pa_a3'       : self.pa_a3,                           # <<< new
             'snr_dB'      : float(np.mean(per_symbol_avg_snr)),  # mean per‐symbol SNR [dB]
             'snr_vec'     : per_symbol_avg_snr,                  # list of per‐symbol SNRs [dB]
             'total_err'   : total_err,                           # total bit‐errors in packet
