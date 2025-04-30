@@ -2,7 +2,7 @@ import numpy as np
 import random
 import simpy
 import matplotlib.pyplot as plt
-from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched
+from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched, plot_vehicles_gif, firetruck_broadcast
 import ofdm_simulation_v2 as phy  # existing OFDM simulation module
 from sim import MACSim
 from scipy.special import erfc
@@ -144,12 +144,15 @@ def simulate_stoplight():
     - Runs the MAC/PHY sim for 10 s, then plots and prints diagnostics.
     """
     print("\n=== Stoplight Scenario ===")
-    # Set up two vehicles heading toward x=50 m
-    vehicles_sl = [
-        Vehicle('V1', -200,   0, 20.0, 0),   # starting at x=0 m, speed 10 m/s
-        Vehicle('V2', 0, -200, 0, 20.0)    # starting at x=-20 m, speed 10 m/s
-    ]
+    
     env_sl = simpy.Environment()
+    # Set up two vehicles heading toward x=50 m
+    
+    vehicles_sl = [
+        Vehicle(env_sl, 'V1', -200, 0, 20.0, 0, 0, 0, 5, 2, 0),
+        Vehicle(env_sl, 'V2', -200, -200, 0, 20.0, 0, 0, 5, 2, 0)  # starting at x=-20 m, speed 10 m/s
+    ]
+    
     mac_sl = MACSim(env_sl, vehicles_sl)
 
     # setattr(phy, 'snr_db', 20)
@@ -383,55 +386,36 @@ def simulate_emergency_vehicle():
 
     mac_sl = MACSim(env_sl, vehicles_sl)
 
-    # Stoplight controller process
-    def control(env):
-        # At t=10.0 s, turn red: vehicles stop
-        yield env.timeout(10.0)
-        print("Stoplight RED at t=10.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V1'):
-                v.velocity = np.array([3.0,0])
-            else:
-                v.velocity = np.array([0, 3.0])
-        # At t=30.0 s, turn green: vehicles resume 10 m/s
-        yield env.timeout(4.0)
-        print("Stoplight1 GREEN at t=14.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V1'):
-                v.velocity = np.array([20.0,0])
-        # At t=30.0 s, turn green: vehicles resume 10 m/s
-        yield env.timeout(4.0)
-        print("Stoplight2 GREEN at t=18.0 s")
-        for v in vehicles_sl:
-            if (v.id == 'V2'):
-                v.velocity = np.array([0,20.0])
-
-
-    env_sl.process(control(env_sl))
-
     # Run the simulation
     df_sl = mac_sl.run(until=20.0)
 
+    # Stoplight controller process
+    
+
+    env_sl.process(firetruck_broadcast(env_sl, vehicles_sl[0], vehicles_sl, stop_radius=40))
+
+    plot_vehicles_gif(env_sl, vehicles_sl)
+    
     # Print first few PHY events
-    print("=== PHY Log (Stoplight, first 1000 rows) ===")
-    if df_sl.empty:
-        print("<No events>")
-    else:
-        print(df_sl.head(100).to_string(index=False))
+    # print("=== PHY Log (Stoplight, first 1000 rows) ===")
+    # if df_sl.empty:
+    #     print("<No events>")
+    # else:
+    #     print(df_sl.head(100).to_string(index=False))
 
     # Plot trajectories and BER
     plot_vehicles_enriched(list(mac_sl.vehicles.values()))
-    mac_sl.plot_ber_vs_time(df_sl)
-    mac_sl.plot_snr_vs_time(df_sl)
+    # mac_sl.plot_ber_vs_time(df_sl)
+    # mac_sl.plot_snr_vs_time(df_sl)
 
     # Histogram of per-packet BER
-    plt.figure()
-    plt.hist(df_sl['ber'], bins=20, edgecolor='black')
-    plt.title('Per-Packet BER Histogram (Stoplight)')
-    plt.xlabel('BER')
-    plt.ylabel('Count')
-    plt.grid(True)
-    plt.show()
+    # plt.figure()
+    # plt.hist(df_sl['ber'], bins=20, edgecolor='black')
+    # plt.title('Per-Packet BER Histogram (Stoplight)')
+    # plt.xlabel('BER')
+    # plt.ylabel('Count')
+    # plt.grid(True)
+    # plt.show()
 
 if __name__ == '__main__':
     # basic_simulation()
@@ -443,7 +427,7 @@ if __name__ == '__main__':
     # test_reproducibility()
     # test_csma_collision()
     # simulate_stoplight()
-    simulate_constant_speed()
+    # simulate_constant_speed()
     # simulate_emergency()
     # simulate_far_fast_moving()
-    # simulate_emergency_vehicle()
+    simulate_emergency_vehicle()
