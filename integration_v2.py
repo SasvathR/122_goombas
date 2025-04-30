@@ -152,9 +152,9 @@ def simulate_stoplight():
     env_sl = simpy.Environment()
     mac_sl = MACSim(env_sl, vehicles_sl)
 
-    setattr(phy, 'snr_db', 4)
-    setattr(phy, 'quant_bits', 6)
-    setattr(phy, 'phase_noise_std', 0.05)
+    # setattr(phy, 'snr_db', 20)
+    # setattr(phy, 'quant_bits', 6)
+    # setattr(phy, 'phase_noise_std', 0.01)
 
     # Stoplight controller process
     def control(env):
@@ -213,10 +213,6 @@ def simulate_constant_speed():
     - Runs the MAC/PHY sim for 10 s, then plots and prints diagnostics.
     """
     print("\n=== Constant Speed Scenario ===")
-
-    # setattr(phy, 'snr_db', 4)
-    # setattr(phy, 'quant_bits', 6)
-    # setattr(phy, 'phase_noise_std', 0.05)
 
     # Set up two vehicles heading toward x=50 m
     vehicles_sl = [
@@ -320,6 +316,6 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    # simulate_stoplight()
+    simulate_stoplight()
     # simulate_constant_speed()
-    simulate_emergency()
+    # simulate_emergency()
