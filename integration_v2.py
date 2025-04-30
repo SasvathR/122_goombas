@@ -214,9 +214,9 @@ def simulate_constant_speed():
     """
     print("\n=== Constant Speed Scenario ===")
 
-    setattr(phy, 'snr_db', 20)
-    setattr(phy, 'quant_bits', 6)
-    setattr(phy, 'phase_noise_std', 0.01)
+    # setattr(phy, 'snr_db', 20)
+    # setattr(phy, 'quant_bits', 6)
+    # setattr(phy, 'phase_noise_std', 0.01)
 
     # Set up two vehicles heading toward x=50 m
     vehicles_sl = [
@@ -276,5 +276,5 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_stoplight()
-    # simulate_constant_speed()
+    # simulate_stoplight()
+    simulate_constant_speed()
