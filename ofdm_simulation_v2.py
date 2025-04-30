@@ -147,10 +147,28 @@ def add_awgn_fixed_noise(sig, snr_db):
 
 def add_phase_noise(x, std):
     return x * np.exp(1j*std*np.random.randn(*x.shape))
-
+    
 def add_quantization_noise(x, bits):
+    """
+    Uniformly quantize the complex baseband signal x to 'bits' bits of resolution.
+    Assumes full‐scale corresponds to ±max_abs = max|x[n]|. Returns the quantized x.
+    """
+    # 1) find full‐scale for this block
+    max_abs = np.max(np.abs(x))
+    if max_abs == 0:
+        return x.copy()
+
+    # 2) number of quantization levels per axis
     levels = 2**bits
-    return np.round(x*levels)/levels
+    # step size so that levels span [-max_abs, +max_abs]
+    step = 2 * max_abs / (levels - 1)
+
+    # 3) quantize real and imag separately
+    real_q = np.round(x.real / step) * step
+    imag_q = np.round(x.imag / step) * step
+
+    # 4) return the quantized waveform
+    return real_q + 1j * imag_q
 
 # ─── FIXED JAKES FADING (unit‐power) ────────────────────────────────────────────
 def jakes_fading(f_D, fs, N, M=16):

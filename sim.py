@@ -4,16 +4,171 @@ import random
 import pandas as pd
 import matplotlib.pyplot as plt
 from vehicle_mobility import ChannelFading
-import ofdm_simulation_v2 as phy  # existing OFDM simulation module
+import ofdm_simulation_v3 as phy  # existing OFDM simulation module
 from numba import njit
 import zlib
 from math import ceil
+import time
+
+# ——— PARAMETERS (tune these to match sim.py globals) ———
+Ptx_dBm     = 12.0                           # transmit power [dBm]
+Ptx_W       = 10**((Ptx_dBm-30)/10)          # → [W]
+quant_bits  = [8, 12]                        # test 8-bit & 12-bit quantizers
+pn_std_list = [0.0, getattr(phy,'phase_noise_std',0.05)]  
+                                            # no PN vs your std 
 
 # CSMA-CA parameters
 difs_slots = 2.5      # DIFS in slot units
 slot_time = getattr(phy, 'SLOT_TIME', 20e-6)  # 50 μs slot default
 cw_min = 15           # min contention window (slots)
 cw_max = 1024       # max contention window (slots)
+
+symbol_dur = getattr(phy, 'SYMBOL_DURATION', 64e-7)
+
+PA_models   = [
+    ("Ideal",    0.00),
+    ("Moderate", 0.01),
+    ("Severe",   0.05),
+]
+
+def plot_constellations(df, rx_id=None, max_plots=4):
+    """
+    Fast constellation plots for up to `max_plots` packets.
+    """
+    # Debug: inspect DataFrame
+    print(f"DataFrame shape: {df.shape}")
+    print("Columns:", df.columns.tolist())
+    if 'rx' in df.columns:
+        print("Unique rx IDs:", df['rx'].unique())
+    else:
+        print("No 'rx' column in df!")
+
+    # Filter by receiver if requested
+    if rx_id is not None:
+        print(f"Filtering for rx_id = {rx_id!r}")
+        df = df[df['rx'] == rx_id]
+
+    if df.empty:
+        print("No data to plot (after filtering).")
+        return
+
+    # now pick earliest packets
+    sel = df.nsmallest(max_plots, 'time')
+
+    # 2) pick the earliest max_plots rows without a full sort
+    sel = df.nsmallest(max_plots, 'time')
+
+    times    = sel['time'].values
+    snrs     = sel['snr_dB'].values
+    tx_syms  = sel['tx_syms'].tolist()
+    rx_syms  = sel['rx_syms'].tolist()
+
+    n_plots = len(times)
+    if n_plots == 0:
+        print("No data to plot.")
+        return
+
+    plt.figure(figsize=(4*n_plots, 4))
+    for i, (t, snr, tx, rx) in enumerate(zip(times, snrs, tx_syms, rx_syms)):
+        ax = plt.subplot(1, n_plots, i+1)
+        ax.scatter(rx.real, rx.imag, s=20, alpha=0.6, label='Rx')
+        ax.scatter(tx.real, tx.imag, marker='x', c='r', label='Tx')
+        ax.set_title(f"t={t:.3f}s\nSNR={snr:.1f} dB")
+        ax.set_xlabel('I'); ax.set_ylabel('Q')
+        ax.grid(True); ax.axis('equal')
+        if i == 0:
+            ax.legend(loc='upper right')
+    plt.tight_layout()
+    plt.show()
+
+def prbs_seq(degree, length):
+    """Max-length PRBS for payload generation."""
+    reg = np.ones(degree, dtype=int)
+    out = np.zeros(length, dtype=int)
+    for i in range(length):
+        fb = int(reg[-1] ^ reg[0])
+        out[i] = reg[-1]
+        reg[1:] = reg[:-1]
+        reg[0]  = fb
+    return out
+
+def add_awgn_integrated(x):
+    """
+    Add complex AWGN based on the physical noise floor noise_var.
+    Matches exactly the manual block:
+      noise = sqrt(noise_var/2)*(randn + j randn)
+      rx_sig = clean_sig + noise
+    """
+    noise = np.sqrt(noise_var/2) * (
+        np.random.randn(*x.shape)
+      + 1j*np.random.randn(*x.shape)
+    )
+    return x + noise
+
+def pa_nonlinear(x, a1, a3):
+    """Cubic PA model: y = a1·x + a3·|x|²·x."""
+    return a1*x + a3*(np.abs(x)**2)*x
+
+def compute_evm(rx_syms, tx_syms):
+    """RMS EVM (linear) → dB."""
+    evm_lin = np.mean(np.abs(rx_syms - tx_syms)**2) / np.mean(np.abs(tx_syms)**2)
+    return 20*np.log10(np.sqrt(evm_lin))
+def plot_pa_evm(Nfft, Ncp, mod_order):
+    """
+    Plot EVM for different PA nonlinearities, phase-noise and quantizers,
+    using the fixed noise floor from add_awgn_integrated(sig).
+    """
+    # 1) prep IFFT normalization to remove the √Nfft gain
+    ifft_norm = 1/np.sqrt(Nfft)
+
+    # 2) generate one OFDM symbol (PRBS payload)
+    n_bits   = Nfft * int(np.log2(mod_order))
+    bits     = prbs_seq(7, n_bits)
+    syms_int = bits.reshape(Nfft,2)[:,0]*2 + bits.reshape(Nfft,2)[:,1]
+    tx_syms  = phy.qammod(syms_int, mod_order)
+
+    plt.figure(figsize=(8,5))
+    for label, a3 in PA_models:
+        # build & scale TX waveform
+        tx_bb = phy.ofdm_transmitter(tx_syms, Nfft, Ncp) * ifft_norm
+        tx_bb *= np.sqrt(Ptx_W / np.mean(np.abs(tx_bb)**2))
+
+        # apply PA nonlinearity
+        pa_bb = pa_nonlinear(tx_bb, 1.0, a3)
+
+        # add AWGN (fixed noise floor)
+        rx_awgn = add_awgn_integrated(pa_bb)
+
+        for pn_std in pn_std_list:
+            # add phase noise if requested
+            rx_pn = phy.add_phase_noise(rx_awgn, pn_std) if pn_std>0 else rx_awgn
+
+            for qb in quant_bits:
+                # add quantization
+                rx_q = phy.add_quantization_noise(rx_pn, qb) if qb>0 else rx_pn
+
+                # OFDM RX
+                rx_syms = phy.ofdm_receiver(rx_q, Nfft, Ncp)
+
+                # compute EVM
+                evm_db = compute_evm(rx_syms, tx_syms)
+
+                # plot
+                legend = f"{label}, PN={pn_std:.2f}, Q={qb}b"
+                plt.scatter(label, evm_db, s=80, alpha=0.7, label=legend)
+
+    plt.title("PA & Impairment EVM (fixed noise floor)")
+    plt.xlabel("PA Model")
+    plt.ylabel("EVM (dB)")
+    plt.grid(True)
+    # one legend entry per unique label
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys(),
+               bbox_to_anchor=(1.05,1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+
 
 def int_to_bits(x, width):
     return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
@@ -56,8 +211,6 @@ fc  = 5.9e9                  # carrier frequency [Hz] (DSRC band)
 lam = c / fc                 # wavelength [m]
 d0  = 1.0                    # reference distance [m]
 alpha = 2.0                  # free-space exponent
-
-snr_db = 10.0
 
 k_B   = 1.38e-23       # Boltzmann’s constant
 T0    = 290            # room temperature [K]
@@ -334,7 +487,7 @@ class MACSim:
             self.fading[key].f_max = f_d
                 # Simulation parameters
 
-        symbol_dur = getattr(phy, 'SYMBOL_DURATION', 64e-7)
+        
         # Path-loss model reference distance and exponent
         d0 = getattr(phy, 'REF_DISTANCE', 1.0)      # 1 meter reference
         alpha = getattr(phy, 'PATHLOSS_EXP', 2.0)    # free-space → 2.0
@@ -356,19 +509,11 @@ class MACSim:
             # Compute distance-based path loss
             disp = rx.position - tx.position
             dist = np.linalg.norm(disp)
-                        # Compute distance-based path loss (d0 reference)
-            # pl_lin = (d0/dist)**alpha if dist>0 else 1.0
 
             if dist > d0:
                 pl_lin = fspl_d0 * (d0/dist)**alpha
             else:
                 pl_lin = 1.0
-            
-            # Noise settings
-            
-            # snr_lin = 10.0**(snr_db/10.0)
-            # print(f"  → dist = {dist:.1f} m, PL = {10*np.log10(pl_lin):.1f} dB, "f"so RX SNR ≈ {snr_db + 10*np.log10(pl_lin):.1f} dB")
-            # Multiple OFDM symbols
 
             all_bits = []
             for k in range(num_packets):
@@ -410,30 +555,19 @@ class MACSim:
                 # convert to dBm
                 Prx_dBm = 10*np.log10(Prx_lin) + 30
                 noise_dBm = 10*np.log10(noise_var) + 30
-                print(f"  → Prx = {Prx_dBm:.1f} dBm, noise = {noise_dBm:.1f} dBm, SNR ≈ {Prx_dBm - noise_dBm:.1f} dB")
-                # rx_sig = np.sqrt(pl_lin) * h * tx_sig
-                # 4) Impairments: phase noise + AWGN + quantization
-                # rx_sig = phy.add_awgn_fixed_noise(clean_sig, snr_db)
-                # 4) Impairments: fixed‐noise AWGN from TX reference
-                # fixed‐noise AWGN remains referenced to tx_sig
-                # noise_only = phy.add_awgn_fixed_noise(tx_sig, snr_db) - tx_sig
-                # rx_sig     = clean_sig + noise_only
+                # print(f"  → Prx = {Prx_dBm:.1f} dBm, noise = {noise_dBm:.1f} dBm, SNR ≈ {Prx_dBm - noise_dBm:.1f} dB")
 
 
-                noise = np.sqrt(noise_var/2)*(np.random.randn(*clean_sig.shape) +
-                              1j*np.random.randn(*clean_sig.shape))
-                rx_sig = clean_sig + noise
-
-                rx_sig = phy.add_awgn_fixed_noise(rx_sig, snr_db)
+                rx_sig = add_awgn_integrated(clean_sig)
                 rx_sig = phy.add_phase_noise(rx_sig, getattr(phy, 'phase_noise_std', 0.3))
-                # rx_sig = phy.add_quantization_noise(rx_sig, getattr(phy, 'quant_bits', 10))
-                # 5) OFDM RX & equalize
+
+                # quantization only degrades at like 4 or 2 bits
+                rx_sig = phy.add_quantization_noise(rx_sig, 12)
 
                 rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
                 rx_eq = rx_syms / h
                 # 6) Demod & count bit errors
                 rx_idx = self.qam_demod(rx_eq)
-                # print(len(rx_idx))
                 rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
 
                 # ─── frequency‐domain snapshots ───────────────────────
@@ -449,6 +583,11 @@ class MACSim:
                 # ─── rest of RX chain ─────────────────────────────────
                 # 5) equalize each subcarrier by the known flat‐fading h
                 rx_eq = rxFFT / h
+
+                # ——— record the first‐symbol constellation for plotting ———
+                if k == 0:
+                    first_tx_syms = mod_syms.copy()
+                    first_rx_syms = rx_eq.copy()
 
                 # 6) QAM demodulate back to integer symbols
                 rx_idx = self.qam_demod(rx_eq)
@@ -476,40 +615,21 @@ class MACSim:
                 rx.receive_bsm(data[66:-4])
             # Compute BER and instantaneous SNR
             ber = total_err / total_bits
-            # avg_snr_db = float(np.mean(snr_list))
-            # noise       = rx_sig - clean_sig
-            # signal_pow  = np.mean(np.abs(clean_sig)**2)
-            # noise_pow   = np.mean(np.abs(noise)**2)
-            # inst_snr_lin = signal_pow / noise_pow
-            # inst_snr_db  = 10*np.log10(inst_snr_lin) if noise_pow>0 else -np.inf
-
-            
-
-            # --------------
-
-            # noise       = rx_sig - clean_sig
-            # signal_pow  = np.mean(np.abs(clean_sig)**2)
-            # noise_pow   = np.mean(np.abs(noise)**2)
-
-            # inst_snr_lin = signal_pow / noise_pow
-            # inst_snr_db  = 10*np.log10(inst_snr_lin)
-
-            # --------------    
-
-            # inst_snr_lin = pl_lin * abs(h)**2 * snr_lin
-            # inst_snr_db  = 10*np.log10(inst_snr_lin)
-            # Log
-            # print(f"⟨pl·|h|²⟩ = {10*np.log10(np.mean(pl_lin * np.abs(h)**2)):.1f} dB")
-            # print(f"avg SNR ≈ {snr_db + 10*np.log10(np.mean(pl_lin * np.abs(h)**2)):.1f} dB")
             self.log.append({
-                'time': t,
-                'tx': tx_id,
-                'rx': rx_id,
-                'snr_dB'   : float(np.mean(per_symbol_avg_snr)),
-                'snr_vec'  : per_symbol_avg_snr,   # <- vector of mean subcarrier SNR per symbol
-                'ber': ber,
-                'success': ber < 1e-1
-            })
+            'time'        : t,                                    # packet start time
+            'tx'          : tx_id,                                # transmitter ID
+            'rx'          : rx_id,                                # receiver ID
+            'distance_m'  : dist,                                # link distance [m]
+            'path_loss'   : pl_lin,                              # linear path‐loss
+            'snr_dB'      : float(np.mean(per_symbol_avg_snr)),  # mean per‐symbol SNR [dB]
+            'snr_vec'     : per_symbol_avg_snr,                  # list of per‐symbol SNRs [dB]
+            'total_err'   : total_err,                           # total bit‐errors in packet
+            'total_bits'  : total_bits,                          # total bits in packet
+            'ber'         : ber,                                 # bit‐error‐rate = total_err/total_bits
+            'success'     : (ber < 1e-3),                        # simple success flag
+            'tx_syms'     : first_tx_syms,                       # first‐symbol ideal QAM constellation
+            'rx_syms'     : first_rx_syms                        # first‐symbol received constellation
+        })
         # Release channel after packet
         yield self.env.timeout(symbol_dur * num_packets)
         self.channel_busy = False
@@ -538,7 +658,7 @@ class MACSim:
     def plot_ber_vs_time(self, df):
         """Plot BER over time for each receiver."""
         if df.empty:
-            print("No data to plot.")
+            print("No data to plot BER.")
             return
         plt.figure()
         for rx_id in df['rx'].unique():
@@ -560,13 +680,10 @@ class MACSim:
           - 'snr_vec': list/array of per-symbol SNRs [dB]
         """
         if df.empty or not {'time','snr_dB','snr_vec'}.issubset(df.columns):
-            print("No data to plot."); 
+            print("No data to plot SNR."); 
             return
 
         plt.figure(figsize=(8,4))
-
-        # duration of one OFDM symbol (to place scatter points)
-        sym_dur = getattr(phy, 'SYMBOL_DURATION', 1e-4)
 
         for rx in sorted(df['rx'].unique()):
             sub = df[df['rx'] == rx]
@@ -579,8 +696,8 @@ class MACSim:
             for _, row in sub.iterrows():
                 packet_t = row['time']
                 vec      = np.asarray(row['snr_vec'])
-                # symbol times spaced by sym_dur
-                times    = packet_t + np.arange(vec.size) * sym_dur
+                # symbol times spaced by symbol_dur
+                times    = packet_t + np.arange(vec.size) * symbol_dur
                 plt.scatter(times, vec,
                             s=10, alpha=0.3, label=f'RX {rx} symbols' 
                                                   if _==sub.index[0] else "")
@@ -592,23 +709,3 @@ class MACSim:
         plt.legend(loc='upper right', ncol=2)
         plt.tight_layout()
         plt.show()
-    
-    # def plot_snr_vs_time(self, df):
-    #     """Plot SNR over time for each receiver."""
-    #     if df.empty or 'snr_dB' not in df.columns:
-    #         print('No data to plot.'); return
-    #     plt.figure()
-    #     for rx in df['rx'].unique():
-    #         sub = df[df['rx'] == rx]
-    #         # plt.plot(sub['time'], sub['snr_dB'], label=f'RX {rx}')
-    #         # flat, average SNR per packet
-    #         plt.plot(sub['time'], sub['snr_dB'], '-', label=f'RX {rx} avg')
-
-    #         # scatter out each symbol's SNR jitter
-    #         for _, row in sub.iterrows():
-    #             # time of packet + per-symbol offsets
-    #             times = row['time'] + np.arange(len(row['snr_list'])) * getattr(phy, 'SYMBOL_DURATION', 1e-4)
-    #             plt.scatter(times, row['snr_list'], s=5, alpha=0.4)
-            
-    #     plt.title('SNR vs Time')
-    #     plt.xlabel('Time (s)'); plt.ylabel('SNR (dB)'); plt.legend(); plt.grid(True); plt.show()

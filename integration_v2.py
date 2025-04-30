@@ -3,12 +3,12 @@ import random
 import simpy
 import matplotlib.pyplot as plt
 from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched
-import ofdm_simulation_v2 as phy  # existing OFDM simulation module
+import ofdm_simulation_v3 as phy  # existing OFDM simulation module
 from sim import MACSim
+from sim import plot_pa_evm, plot_constellations
 from scipy.special import erfc
 
 # === Validation & Testing Suite ===
-
 
 def test_static_channel():
     """
@@ -197,6 +197,10 @@ def simulate_stoplight():
     mac_sl.plot_ber_vs_time(df_sl)
     mac_sl.plot_snr_vs_time(df_sl)
 
+
+    print("got here")
+    plot_constellations(df_sl, rx_id=1, max_plots=4)
+    print("but not here")
     # Histogram of per-packet BER
     plt.figure()
     plt.hist(df_sl['ber'], bins=20, edgecolor='black')
@@ -363,7 +367,9 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    # simulate_stoplight()
+    simulate_stoplight()
+    # plot_pa_evm(Nfft=64, Ncp=16, mod_order=4)
+
     # simulate_constant_speed()
     # simulate_emergency()
-    simulate_far_fast_moving()
+    # simulate_far_fast_moving()
