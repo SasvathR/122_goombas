@@ -267,29 +267,95 @@ def simulate_emergency():
     """
     print("\n=== Constant Speed Scenario ===")
 
+    env_sl = simpy.Environment()
     emergency_stopped = {}
+
+    def start_stopping(v):
+        v.state = "stopping"
+        v.blinkers = True
+        while True:
+            yield env_sl.timeout(0.1)
+            if v.lane == 1:                   
+                if v.position[1] < 4 or v.velocity[0] != 0:
+                    v.acceleration = np.array([-5.5, 0])
+                    v.velocity[1] = 2
+                if v.position[1] > 6:
+                    v.velocity[1] = 0
+                if v.velocity[0] <= 0:
+                    v.acceleration = np.array([0.0,0.0])
+                    v.velocity = np.array([0.0,0.0])
+                    break
+            else:
+                if v.position[1] > -4 or v.velocity[0] != 0:
+                    v.acceleration = np.array([-5.5, 0])
+                    v.velocity[1] = -2
+                if v.position[1] < -6:
+                    v.velocity[1] = 0
+                if v.velocity[0] <= 0:
+                    v.acceleration = np.array([0.0,0.0])
+                    v.velocity = np.array([0.0,0.0])
+                    break
+        v.state = "stopped"
+    def start_starting(v):
+        v.state = "starting"
+        v.blinkers = False
+        while True:
+            yield env_sl.timeout(0.1)
+            if v.lane == 1:
+                if v.position[1] > v.original_position1:
+                    v.velocity[1] = -2
+                if v.position[1] <= v.original_position1 + 1:
+                    v.velocity[1] = 0
+                if v.velocity[0] < v.original_velocity[0]:
+                    v.acceleration = np.array([5, 0])
+                if v.velocity[0] >= v.original_velocity[0]:
+                    v.acceleration = np.array([0, 0])
+                    break
+            else:
+                if abs(v.position[1]) > abs(v.original_position1):
+                    v.velocity[1] = 2
+                if abs(v.position[1]) <= abs(v.original_position1 - 1):
+                    v.velocity[1] = 0
+                if v.velocity[0] < v.original_velocity[0]:
+                    v.acceleration = np.array([5, 0])
+                if v.velocity[0] >= v.original_velocity[0]:
+                    v.acceleration = np.array([0, 0])
+                    break
+        v.state = "normal"
     def react_emergency(v, data):
         # if data["emergency"]:
         #     print(data)
         #     # print(v.position, data["lat"] / 1e7, data["lon"] / 1e7)
         # print(data["emergency"], np.array([v.position[0] - data["lat"] / 1e7, v.position[1] - data["lon"] / 1e7]))
-        if v.id not in emergency_stopped and data["emergency"] and np.linalg.norm(np.array([v.position[0] - data["lat"] / 1e7, v.position[1] - data["lon"] / 1e7])) < 40:
+        d = np.linalg.norm(np.array([v.position[0] - data["lat"] / 1e6, v.position[1] - data["lon"] / 1e6])) 
+        if v.id not in emergency_stopped and data["emergency"] and d < 100:
             emergency_stopped[v.id] = True
+            # print(v.id, env_sl.now, v.position)
+            env_sl.process(start_stopping(v))
+        elif v.id in emergency_stopped and data["emergency"] and d > 120:
+            # print(v.id, env_sl.now, v.position)
+            env_sl.process(start_starting(v))
+            del emergency_stopped[v.id]
+        return
 
     # Set up grid of moving vehicles
-    vehicles_sl = [Vehicle(f'V{i}', 100 + i * 10, (i % 2) * 4, 10, 0, receive_f=react_emergency) for i in range(20)] # grid of moving cars
-    vehicles_sl.append(Vehicle("Emergency", 0, 0, 40, 0))
+    vehicles_sl = [Vehicle(env_sl, f'V{i}', 300 + (i // 2) * 15, ((i % 2) - 0.5) * 4, 10, 0, lane=i%2, receive_f=react_emergency) for i in range(20)] # grid of moving cars
+    vehicles_sl.append(Vehicle(env_sl, "Emergency", 0, 0, 40, 0, l=12, w=2.5))
     
-    env_sl = simpy.Environment()
     mac_sl = MACSim(env_sl, vehicles_sl)
+
+    # env_sl.process(plot_vehicles_gif(env_sl, vehicles_sl))
 
     # Run the simulation
     df_sl = mac_sl.run(until=20.0)
 
+    # print(vehicles_sl[0].history)
+
     print(emergency_stopped)
     for v in vehicles_sl:
         print(v.id, v.position)
-    # print(vehicles_sl[2].history)
+
+    plot_vehicles_gif(vehicles_sl)
 
     # Histogram of per-packet BER
     # plt.figure()
@@ -430,10 +496,10 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_stoplight()
+    simulate_emergency()
     # plot_pa_evm(Nfft=64, Ncp=16, mod_order=4)
 
     # simulate_constant_speed()
     # simulate_emergency()
     # simulate_far_fast_moving()
-    simulate_emergency_vehicle()
+    # simulate_emergency_vehicle()

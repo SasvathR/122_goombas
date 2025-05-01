@@ -60,13 +60,14 @@ class Vehicle:
         self.receive_f = receive_f
         self.process = env.process(self.move())
         self.packets_received = 0
+        self.state = "normal"
     
     def move(self):
         while True:
             yield self.env.timeout(0.1)
             self.velocity += self.acceleration * 0.1
             self.position += self.velocity * 0.1
-            self.history.append((self.env.now, self.position.copy()))
+            self.history.append((self.env.now, self.position.copy(), self.state))
 
     def move_to(self, t):
         dt = t - self.last_update
@@ -89,7 +90,7 @@ class Vehicle:
         self._last_speed = speed
         
         # Update position history
-        self.history.append((t, self.position.copy()))
+        # self.history.append((t, self.position.copy()))
         self.last_update = t
 
     @property
@@ -128,8 +129,8 @@ class Vehicle:
         def int_to_bits(x, width):
             return [int(b) for b in format(x & ((1 << width) - 1), f'0{width}b')]
 
-        lat = int(self.position[0] * 1e7)
-        lon = int(self.position[1] * 1e7)
+        lat = int(self.position[0] * 1e6)
+        lon = int(self.position[1] * 1e6)
         elev = int(15)
         speed = int(np.linalg.norm(self.velocity) * 100)
         heading = int(np.degrees(np.arctan2(self.velocity[1], self.velocity[0])) * 100) % 36000
@@ -268,7 +269,7 @@ def firetruck_broadcast(env_sl, firetruck, vehicles, stop_radius=40):
                                 v.acceleration = np.array([0, 0])
 
 
-def plot_vehicles_gif(env, vehicles):
+def plot_vehicles_gif(vehicles):
     fig, ax = plt.subplots()
     fig.set_size_inches(18.5, 10.5, forward=True)
     colors = ['red', 'blue', 'green', 'orange']
@@ -278,25 +279,25 @@ def plot_vehicles_gif(env, vehicles):
         rect = Rectangle(
             (v.position[0] - l/2, v.position[1] - w/2),  # bottom-left corner
             l, w,
-            color='red' if v.id == "Emergency" else 'blue',
+            color='red' if v.id == "Emergency" else "blue",
             label=v.id,
             zorder = 2
         )
         ax.add_patch(rect)
         rectangles.append(rect)
-    ax.set_xlim(-250, 100)
+    ax.set_xlim(0, 800)
     ax.set_ylim(-80, 80)
     ax.set_title('Firetruck Simulation')
     ax.set_xlabel('X Position (m)')
     ax.set_ylabel('Y Position (m)')
     ax.legend()
 
-    ax.plot([-1000, 500], [0, 0], color='white', linestyle='--', linewidth = 2, zorder = 1)
+    ax.plot([0, 1000], [0, 0], color='white', linestyle='--', linewidth = 2, zorder = 1)
 
     road_y_center = 0
     road_height = 16
     ax.add_patch(Rectangle(
-        (-1000, road_y_center - road_height / 2),  # start x, start y
+        (0, road_y_center - road_height / 2),  # start x, start y
         1500,  # road length (adjust to fit simulation)
         road_height,
         color='gray',
@@ -308,19 +309,23 @@ def plot_vehicles_gif(env, vehicles):
 
 
     for y in [-6, 6]:  # lane boundaries
-        ax.plot([-1000, 500], [y, y], color='yellow', linestyle='--', linewidth=1, zorder=1)
+        ax.plot([0, 1000], [y, y], color='yellow', linestyle='--', linewidth=1, zorder=1)
 
     # Center line (optional)
-    
-    print(vehicles[1].velocity)
 
-    def update(frame):
-        target_time = frame * 0.1    
-        yield env.timeout(target_time - env.now)
+    v_on = [0] * len(vehicles)
+    def update(frame):   
         for i, v in enumerate(vehicles):
+            while frame * 0.1 > v.history[v_on[i]][0]:
+                v_on[i] += 1
             l, w = v.size
-            rectangles[i].set_xy((v.position[0] - l/2, v.position[1] - w/2))
-        ax.set_title(f"Time: {env.now:.2f}s")
+            if v.id != "Emergency":
+                if v.history[v_on[i]][2] == "normal":
+                    rectangles[i].set_facecolor("blue")
+                else:
+                    rectangles[i].set_facecolor("red")
+            rectangles[i].set_xy((v.history[v_on[i]][1][0] - l/2, v.history[v_on[i]][1][1] - w/2))
+        ax.set_title(f"Time: {v.history[v_on[i]][0]:.2f}s")
         return rectangles
 
 
