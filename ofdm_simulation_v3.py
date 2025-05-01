@@ -28,7 +28,7 @@ def add_phase_noise(x, std):
     return x * np.exp(1j*std*np.random.randn(*x.shape))
 
 def add_quantization_noise(x, bits):
-    # your fixed‐range quantizer from earlier
+    # fixed‐range quantizer
     max_abs = np.max(np.abs(x))
     if max_abs == 0:
         return x.copy()
@@ -36,3 +36,6 @@ def add_quantization_noise(x, bits):
     real_q = np.round(x.real/step)*step
     imag_q = np.round(x.imag/step)*step
     return real_q + 1j*imag_q   
+
+
+

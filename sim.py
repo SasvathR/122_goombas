@@ -148,9 +148,6 @@ def prbs_seq(degree, length):
 def add_awgn_integrated(x):
     """
     Add complex AWGN based on the physical noise floor noise_var.
-    Matches exactly the manual block:
-      noise = sqrt(noise_var/2)*(randn + j randn)
-      rx_sig = clean_sig + noise
     """
     noise = np.sqrt(noise_var/2) * (
         np.random.randn(*x.shape)
@@ -166,6 +163,7 @@ def compute_evm(rx_syms, tx_syms):
     """RMS EVM (linear) → dB."""
     evm_lin = np.mean(np.abs(rx_syms - tx_syms)**2) / np.mean(np.abs(tx_syms)**2)
     return 20*np.log10(np.sqrt(evm_lin))
+
 def plot_pa_evm(Nfft, Ncp, mod_order):
     """
     Plot EVM for different PA nonlinearities, phase-noise and quantizers,
@@ -589,6 +587,15 @@ class MACSim:
                 # 3) Apply path loss and fading
                 clean_sig = np.sqrt(pl_lin) * h * tx_sig
 
+                # 3a) true Doppler/CFO: rotate every sample by 2π f_d t
+                #    compute sample rate (Hz) from your OFDM parameters
+                #    symbol_dur = duration of one OFDM symbol (including CP)
+                Fs = (self.Nfft + self.Ncp) / symbol_dur
+                n_samp = clean_sig.size
+                t_idx  = np.arange(n_samp) / Fs
+                # f_d was computed above as abs(rx.doppler_shift(tx))
+                clean_sig = clean_sig * np.exp(1j * 2*np.pi * f_d * t_idx)
+
 
                 rx_sig = add_awgn_integrated(clean_sig)
                 rx_sig = phy.add_phase_noise(rx_sig, phase_noise_default)
@@ -735,6 +742,29 @@ class MACSim:
                 plt.scatter(times, vec,
                             s=10, alpha=0.3, label=f'RX {rx} symbols' 
                                                   if _==sub.index[0] else "")
+
+
+    def plot_snr_vs_time_sparse(self, df):
+        """
+        Plot mean per-packet SNR and per-symbol SNR scatter for each receiver.
+
+        Expects df to have columns:
+          - 'time'   : packet start time [s]
+          - 'snr_dB' : mean SNR over symbols [dB]
+          - 'snr_vec': list/array of per-symbol SNRs [dB]
+        """
+        if df.empty or not {'time','snr_dB','snr_vec'}.issubset(df.columns):
+            print("No data to plot SNR."); 
+            return
+
+        plt.figure(figsize=(8,4))
+
+        for rx in sorted(df['rx'].unique()):
+            sub = df[df['rx'] == rx]
+
+            # 1) plot the flat, per-packet average SNR
+            plt.plot(sub['time'], sub['snr_dB'],
+                     '-o', label=f'RX {rx} avg SNR', markersize=4)
 
         plt.title("Per-Subcarrier SNR vs Time")
         plt.xlabel("Time (s)")
