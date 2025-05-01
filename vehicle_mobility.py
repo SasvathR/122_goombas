@@ -452,7 +452,7 @@ def plot_vehicles_enriched(vehicles, time=None):
     for idx, v in enumerate(vehicles):
         # Plot trajectory with stop segments
         if v.history:
-            times, positions = zip(*v.history)
+            times, positions, _ = zip(*v.history)
             x, y = zip(*positions)
             ax.plot(x, y, '--', color=colors[idx], alpha=0.4)
             

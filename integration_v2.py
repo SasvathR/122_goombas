@@ -387,12 +387,13 @@ def simulate_far_fast_moving():
     # setattr(phy, 'quant_bits', 6)
     # setattr(phy, 'phase_noise_std', 0.05)
 
+    env_sl = simpy.Environment()
+
     # Set up two vehicles heading toward x=50 m
     vehicles_sl = [
-        Vehicle('V1', 0,   0, 0, 0),   # starting at x=-200 m, speed 10 m/s
-        Vehicle('V2', -1000, 0, 80.0, 0)    # starting at x=-210 m, speed 10 m/s
+        Vehicle(env_sl, 'V1', 0, 0, 0, 0),   # starting at x=-200 m, speed 10 m/s
+        Vehicle(env_sl, 'V2', -500, 0, 40.0, 0)    # starting at x=-210 m, speed 10 m/s
     ]
-    env_sl = simpy.Environment()
     mac_sl = MACSim(env_sl, vehicles_sl)
 
 
@@ -401,10 +402,10 @@ def simulate_far_fast_moving():
 
     # Print first few PHY events
     print("=== PHY Log (Stoplight, first 1000 rows) ===")
-    if df_sl.empty:
-        print("<No events>")
-    else:
-        print(df_sl.head(100).to_string(index=False))
+    # if df_sl.empty:
+    #     print("<No events>")
+    # else:
+    #     print(df_sl.head(100).to_string(index=False))
 
     # Plot trajectories and BER
     plot_vehicles_enriched(list(mac_sl.vehicles.values()))
@@ -505,11 +506,11 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_emergency()
-    # simulate_stoplight_constellation()
+    # simulate_emergency()
+    # simulate_stoplight_constellation()x
     # plot_pa_evm(Nfft=64, Ncp=16, mod_order=4)
 
     # simulate_constant_speed()
     # simulate_emergency()
-    # simulate_far_fast_moving()
+    simulate_far_fast_moving()
     # simulate_emergency_vehicle()
