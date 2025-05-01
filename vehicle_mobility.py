@@ -102,25 +102,17 @@ class Vehicle:
 
     def doppler_shift(self, transmitter):
         """
-        Compute the Doppler shift (Hz) observed at this vehicle (receiver)
-        for a transmission from 'transmitter'.
+        doppler shift observed at this vehicle (rx) for a transmission from tx
 
-        Uses:
-            v_rel = (v_tx - v_rx) ⋅ (p_rx - p_tx) / |p_rx - p_tx|
-            f_D = (v_rel / c) * f_c
-
-        Args:
-            transmitter (Vehicle): The transmitting vehicle.
-        Returns:
-            float: Doppler frequency shift in Hz.
+        formula
+        v_rel = (v_tx - v_rx) ⋅ (p_rx - p_tx) / |p_rx - p_tx|
+        f_D = (v_rel / c) * f_c
         """
-        # Vector from transmitter to receiver
         disp = self.position - transmitter.position
         dist = np.linalg.norm(disp)
         if dist == 0:
             return 0.0
         direction = disp / dist
-        # Relative velocity (projected)
         rel_vel = np.dot(transmitter.velocity - self.velocity, direction)
         return (rel_vel / self.c) * self.freq
     
@@ -337,6 +329,52 @@ def plot_vehicles_gif(vehicles):
     plt.show()
 
 
+def plot_stoplight_gif(vehicles, duration=10.0, dt=0.1, gif_path="stoplight_scenario.gif", fps=10):
+    """
+    Generate a GIF of the stoplight vehicle movements over time.
+    """
+    fig, ax = plt.subplots()
+    fig.set_size_inches(18.5, 10.5)
+    rectangles = []
+    # draw static road lines
+    ax.plot([-400,400],[0,0],'k--',linewidth=2)
+    ax.plot([0,0],[-400,400],'k--',linewidth=2)
+
+    # initialize vehicle rectangles
+    for v in vehicles:
+        l,w = v.size
+        rect = Rectangle((v.position[0]-l/2, v.position[1]-w/2), l, w,
+                         color='blue', label=v.id, zorder=2)
+        ax.add_patch(rect)
+        rectangles.append(rect)
+
+    ax.set_xlim(-350, 100)
+    ax.set_ylim(-350, 100)
+    ax.set_xlabel('X Position (m)')
+    ax.set_ylabel('Y Position (m)')
+
+    n_frames = int(duration/dt) + 1
+    indices = [0]*len(vehicles)
+
+    def update(frame):
+        t = frame * dt
+        for i,v in enumerate(vehicles):
+            # advance history index
+            while indices[i]+1 < len(v.history) and t >= v.history[indices[i]+1][0]:
+                indices[i] += 1
+            pos = v.history[indices[i]][1]
+            l,w = v.size
+            rectangles[i].set_xy((pos[0]-l/2, pos[1]-w/2))
+        ax.set_title(f"Time: {t:.1f}s")
+        return rectangles
+
+    ani = FuncAnimation(fig, update, frames=n_frames, interval=dt*1000, blit=False)
+    writer = PillowWriter(fps=fps)
+    ani.save(gif_path, writer=writer)
+    plt.close(fig)
+    print(f"Saved stoplight GIF to {gif_path}")
+    return gif_path
+
 def plot_vehicles_old(vehicles, time=None, xlim=(-10, 100), ylim=(-10, 100)):
     """
     Plot all vehicles in 2D with velocity arrows.
@@ -452,7 +490,7 @@ def plot_vehicles_enriched(vehicles, time=None):
     for idx, v in enumerate(vehicles):
         # Plot trajectory with stop segments
         if v.history:
-            times, positions = zip(*v.history)
+            times, positions, _ = zip(*v.history)
             x, y = zip(*positions)
             ax.plot(x, y, '--', color=colors[idx], alpha=0.4)
             

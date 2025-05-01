@@ -4,7 +4,7 @@ import random
 import simpy
 import matplotlib.pyplot as plt
 import ofdm_simulation_v3 as phy  # existing OFDM simulation module
-from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched, plot_vehicles_gif, firetruck_broadcast
+from vehicle_mobility import Vehicle, ChannelFading, plot_vehicles_enriched, plot_vehicles_gif, firetruck_broadcast, plot_stoplight_gif
 from sim import MACSim
 from sim import plot_pa_evm, plot_constellations, plot_constellations_by_pa
 from scipy.special import erfc
@@ -375,6 +375,112 @@ def simulate_emergency():
     # plt.grid(True)
     # plt.show()
 
+def simulate_stoplight_constellation_fixed(
+    duration       = 10.0,          # total sim time [s]
+    stop_start     = 5.0,           # when the light turns red
+    stop_duration  = 3.0,           # how long vehicles sit
+    pa_values      = [0.0, 0.1, 0.5] # cubic‐term coefficients to sweep
+):
+    """
+    Stoplight Scenario:
+    - Four vehicles approach an intersection at the origin from two perpendicular roads.
+    - Vehicles only stop at the red light once they reach the intersection line (x>=0 for eastbound, y>=0 for northbound).
+    - They wait until green, then resume their original speeds.
+    - We sweep multiple PA models, run MACSim, then plot trajectories, BER/SNR, and constellations by PA.
+    """
+    import simpy, pandas as pd
+    print("\n=== Stoplight Scenario ===")
+
+    # 1) Define four vehicles with staggered arrivals
+    veh_params = [
+        ('V1', -300.0,   0.0,  40.0,   0.0),  # eastbound, far
+        ('V2', -200.0,   0.0,  30.0,   0.0),  # eastbound, nearer
+        ('V3',   0.0, -350.0,   0.0,  60.0),  # northbound, far
+        ('V4',   0.0, -250.0,   0.0,  45.0),  # northbound, nearer
+    ]
+
+    all_dfs = []
+    macs    = []
+
+    # 2) Sweep PA nonlinearities
+    for pa_a3 in pa_values:
+        # fresh simpy env & vehicles
+        env      = simpy.Environment()
+        vehicles = [Vehicle(env, vid, x, y, vx, vy) for vid,x,y,vx,vy in veh_params]
+
+        # store original velocities
+        original_vels = {v.id: v.velocity.copy() for v in vehicles}
+
+        # instantiate MACSim with this PA model
+        mac = MACSim(env, vehicles, pa_a3=pa_a3)
+        macs.append(mac)
+
+        # 3) Traffic-light controller: stop only when vehicles reach the intersection
+        def control(env):
+            # wait for red
+            yield env.timeout(stop_start)
+            print(f"  → RED at t={stop_start:.1f}s")
+            red_end = stop_start + stop_duration
+
+            # during red, monitor each vehicle
+            while env.now < red_end:
+                for v in vehicles:
+                    # eastbound lanes: vx>0, stop when x>=0
+                    if v.velocity[0] > 0 and v.position[0] >= 0:
+                        v.velocity[:] = 0.0
+                    # northbound lanes: vy>0, stop when y>=0
+                    if v.velocity[1] > 0 and v.position[1] >= 0:
+                        v.velocity[:] = 0.0
+                # check periodically
+                yield env.timeout(0.05)
+
+            # green light: restore all speeds
+            green_t = red_end
+            print(f"  → GREEN at t={green_t:.1f}s")
+            for v in vehicles:
+                v.velocity[:] = original_vels[v.id]
+
+        env.process(control(env))
+
+        # 4) Run and collect logs
+        df = mac.run(until=duration)
+        df['pa_a3'] = pa_a3
+        all_dfs.append(df)
+
+    # 5) Merge runs
+    df_all = pd.concat(all_dfs, ignore_index=True)
+
+    # 6) MAC-level diagnostics for the first PA model
+    mac0 = macs[0]
+    plot_vehicles_enriched(list(mac0.vehicles.values()))
+    subset0 = df_all[df_all['pa_a3'] == pa_values[0]]
+    mac0.plot_ber_vs_time(subset0)
+    mac0.plot_snr_vs_time(subset0)
+
+    # 7) PHY-level constellations for each receiver
+    for rx in sorted(df_all['rx'].unique()):
+        plot_constellations_by_pa(
+            df_all,
+            rx_id=rx,
+            pa_values=pa_values,
+            max_plots=2
+        )
+
+    # 8) Summary of average BER by PA
+    summary = (
+        df_all
+        .groupby('pa_a3')['ber']
+        .mean()
+        .reset_index()
+        .rename(columns={'ber':'avg_BER'})
+    )
+    print("\nAverage BER by PA model:")
+    print(summary.to_string(index=False))
+
+    return df_all
+
+
+
 def simulate_far_fast_moving():
     """
     Constant Speed Scenario:
@@ -387,12 +493,13 @@ def simulate_far_fast_moving():
     # setattr(phy, 'quant_bits', 6)
     # setattr(phy, 'phase_noise_std', 0.05)
 
+    env_sl = simpy.Environment()
+
     # Set up two vehicles heading toward x=50 m
     vehicles_sl = [
-        Vehicle('V1', 0,   0, 0, 0),   # starting at x=-200 m, speed 10 m/s
-        Vehicle('V2', -1000, 0, 80.0, 0)    # starting at x=-210 m, speed 10 m/s
+        Vehicle(env_sl, 'V1', 0, 0, 0, 0),   # starting at x=-200 m, speed 10 m/s
+        Vehicle(env_sl, 'V2', -500, 0, 40.0, 0)    # starting at x=-210 m, speed 10 m/s
     ]
-    env_sl = simpy.Environment()
     mac_sl = MACSim(env_sl, vehicles_sl)
 
 
@@ -401,10 +508,10 @@ def simulate_far_fast_moving():
 
     # Print first few PHY events
     print("=== PHY Log (Stoplight, first 1000 rows) ===")
-    if df_sl.empty:
-        print("<No events>")
-    else:
-        print(df_sl.head(100).to_string(index=False))
+    # if df_sl.empty:
+    #     print("<No events>")
+    # else:
+    #     print(df_sl.head(100).to_string(index=False))
 
     # Plot trajectories and BER
     plot_vehicles_enriched(list(mac_sl.vehicles.values()))
@@ -473,7 +580,7 @@ def simulate_emergency_vehicle():
 
     env_sl.process(firetruck_broadcast(env_sl, vehicles_sl[0], vehicles_sl, stop_radius=40))
 
-    plot_vehicles_gif(env_sl, vehicles_sl)
+    plot_vehicles_gif(vehicles_sl)
     
     # Print first few PHY events
     # print("=== PHY Log (Stoplight, first 1000 rows) ===")
@@ -496,6 +603,156 @@ def simulate_emergency_vehicle():
     # plt.grid(True)
     # plt.show()
 
+def simulate_emergency_plots(
+    duration = 20.0  # total sim time [s]
+):
+    """
+    Emergency Scenario (Plots):
+    - Grid of vehicles and one emergency vehicle broadcasting.
+    - Reacting cars stop and start based on emergency events.
+    - Runs MACSim for `duration`, then plots SNR and BER time series.
+    """
+    import simpy
+    print("\n=== Emergency Scenario (Plots) ===")
+
+    # 1) Set up environment and state
+    env = simpy.Environment()
+    emergency_stopped = {}
+
+    # 2) Define helper processes and callback
+    def start_stopping(v):
+        v.state = "stopping"
+        v.blinkers = True
+        while True:
+            yield env.timeout(0.1)
+            if v.lane == 1:
+                if v.position[1] < 4 or v.velocity[0] != 0:
+                    v.acceleration = np.array([-5.5, 0])
+                    v.velocity[1] = 2
+                if v.position[1] > 6:
+                    v.velocity[1] = 0
+                if v.velocity[0] == 0:
+                    v.acceleration = np.array([0,0])
+                    break
+            else:
+                if v.position[1] > -4 or v.velocity[0] != 0:
+                    v.acceleration = np.array([-5.5, 0])
+                    v.velocity[1] = -2
+                if v.position[1] < -6:
+                    v.velocity[1] = 0
+                if v.velocity[0] == 0:
+                    v.acceleration = np.array([0,0])
+                    break
+        v.state = "stopped"
+
+    def start_starting(v):
+        v.state = "starting"
+        v.blinkers = False
+        while True:
+            yield env.timeout(0.1)
+            if v.lane == 1:
+                if v.position[1] > v.original_position1:
+                    v.velocity[1] = -2
+                if v.position[1] <= v.original_position1 + 1:
+                    v.velocity[1] = 0
+                if v.velocity[0] < v.original_velocity[0]:
+                    v.acceleration = np.array([5, 0])
+                if v.velocity[0] >= v.original_velocity[0]:
+                    v.acceleration = np.array([0, 0])
+                    break
+            else:
+                if abs(v.position[1]) > abs(v.original_position1):
+                    v.velocity[1] = 2
+                if abs(v.position[1]) <= abs(v.original_position1 - 1):
+                    v.velocity[1] = 0
+                if v.velocity[0] < v.original_velocity[0]:
+                    v.acceleration = np.array([5, 0])
+                if v.velocity[0] >= v.original_velocity[0]:
+                    v.acceleration = np.array([0, 0])
+                    break
+        v.state = "normal"
+
+    def react_emergency(v, data):
+        d = np.linalg.norm(
+            [v.position[0] - data['lat']/1e6,
+             v.position[1] - data['lon']/1e6]
+        )
+        if data['emergency'] and d < 100 and v.id not in emergency_stopped:
+            emergency_stopped[v.id] = True
+            env.process(start_stopping(v))
+        elif data['emergency'] and d > 120 and v.id in emergency_stopped:
+            del emergency_stopped[v.id]
+            env.process(start_starting(v))
+
+    # 3) Instantiate vehicles grid + emergency
+    vehicles_sl = [
+        Vehicle(env,
+                f'V{i}',
+                300 + (i//2)*15,
+                ((i%2)-0.5)*4,
+                10, 0,
+                lane=i%2,
+                receive_f=react_emergency)
+        for i in range(8)
+    ]
+    vehicles_sl.append(
+        Vehicle(env, 'Emergency', 0, 0, 40, 0, l=12, w=2.5)
+    )
+
+    # 4) Run MACSim
+    mac_sl = MACSim(env, vehicles_sl)
+    df_sl = mac_sl.run(until=duration)
+
+    # 5) Plot SNR and BER
+    mac_sl.plot_ber_vs_time(df_sl)
+    mac_sl.plot_snr_vs_time_sparse(df_sl)
+
+    return df_sl
+
+
+
+
+def simulate_stoplight_gif(
+    duration      = 10.0,
+    stop_start    = 5.0,
+    stop_duration = 3.0,
+    pa_a3         = 0.01,
+    gif_path      = "stoplight_scenario.gif",
+    fps           = 10
+):
+    """
+    Run the stoplight scenario once (PA=pa_a3) and produce a movement GIF.
+    """
+    print("\n=== Stoplight Scenario (GIF) ===")
+    env = simpy.Environment()
+    veh_params = [
+        ('V1', -300.0,   0.0,  40.0,   0.0),
+        ('V2', -200.0,   0.0,  30.0,   0.0),
+        ('V3',   0.0, -350.0,   0.0,  60.0),
+        ('V4',   0.0, -250.0,   0.0,  45.0),
+    ]
+    vehicles = [Vehicle(env, vid, x, y, vx, vy) for vid,x,y,vx,vy in veh_params]
+    original_vels = {v.id: v.velocity.copy() for v in vehicles}
+    mac = MACSim(env, vehicles, pa_a3=pa_a3)
+
+    def control(env):
+        yield env.timeout(stop_start)
+        red_end = stop_start + stop_duration
+        while env.now < red_end:
+            for v in vehicles:
+                if (v.velocity[0]>0 and v.position[0]>=0) or \
+                   (v.velocity[1]>0 and v.position[1]>=0):
+                    v.velocity[:] = 0.0
+            yield env.timeout(0.05)
+        for v in vehicles:
+            v.velocity[:] = original_vels[v.id]
+    env.process(control(env))
+
+    # run sim
+    mac.run(until=duration)
+    # vehicles now have history
+    return plot_stoplight_gif(vehicles, duration=duration, dt=0.1, gif_path=gif_path, fps=fps)
+
 if __name__ == '__main__':
     # basic_simulation()
     # test_static_channel()
@@ -505,8 +762,10 @@ if __name__ == '__main__':
     # test_convergence()
     # test_reproducibility()
     # test_csma_collision()
-    simulate_emergency()
-    # simulate_stoplight_constellation()
+    # simulate_emergency()
+    # simulate_emergency_plots()
+    simulate_stoplight_gif()
+    # simulate_stoplight_constellation_fixed()
     # plot_pa_evm(Nfft=64, Ncp=16, mod_order=4)
 
     # simulate_constant_speed()
