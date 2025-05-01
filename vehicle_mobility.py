@@ -278,7 +278,7 @@ def plot_vehicles_gif(vehicles):
         ax.add_patch(rect)
         rectangles.append(rect)
     ax.set_xlim(0, 800)
-    ax.set_ylim(-80, 80)
+    ax.set_ylim(-200, 200)
     ax.set_title('Firetruck Simulation')
     ax.set_xlabel('X Position (m)')
     ax.set_ylabel('Y Position (m)')
@@ -334,11 +334,37 @@ def plot_stoplight_gif(vehicles, duration=10.0, dt=0.1, gif_path="stoplight_scen
     Generate a GIF of the stoplight vehicle movements over time.
     """
     fig, ax = plt.subplots()
-    fig.set_size_inches(18.5, 10.5)
+    fig.set_size_inches(19.5, 10.5)
     rectangles = []
     # draw static road lines
-    ax.plot([-400,400],[0,0],'k--',linewidth=2)
-    ax.plot([0,0],[-400,400],'k--',linewidth=2)
+    ax.plot([-400,7],[12,12],'k--',linewidth=2, zorder = 1)
+    ax.plot([19, 400],[12,12],'k--',linewidth=2, zorder = 1)
+    ax.plot([13,13],[-400,6],'k--',linewidth=2, zorder = 1)
+    ax.plot([13,13],[18,400],'k--',linewidth=2, zorder = 1)
+    for y in [6, 18]:  # lane boundaries
+        ax.plot([-500, 7], [y, y], color='yellow', linestyle='--', linewidth=1, zorder=1)
+        ax.plot([19, 200], [y, y], color='yellow', linestyle='--', linewidth=1, zorder=1)
+    for x in [7, 19]:  # lane boundaries
+        ax.plot([x, x], [-400, 6], color='yellow', linestyle='--', linewidth=1, zorder=1)
+        ax.plot([x, x], [18, 400], color='yellow', linestyle='--', linewidth=1, zorder=1)
+    road_y_center = 12
+    road_x_center = 13
+    road_height = 16
+    ax.add_patch(Rectangle(
+        (-400, road_y_center - road_height / 2),  # start x, start y
+        1500,  # road length (adjust to fit simulation)
+        road_height,
+        color='gray',
+        zorder = 0
+    ))
+
+    ax.add_patch(Rectangle(
+        (road_x_center - road_height / 2, -400),  # start x, start y
+        road_height,  # road length (adjust to fit simulation)
+        1500,
+        color='gray',
+        zorder = 0
+    ))
 
     # initialize vehicle rectangles
     for v in vehicles:
@@ -349,7 +375,7 @@ def plot_stoplight_gif(vehicles, duration=10.0, dt=0.1, gif_path="stoplight_scen
         rectangles.append(rect)
 
     ax.set_xlim(-350, 100)
-    ax.set_ylim(-350, 100)
+    ax.set_ylim(-150, 100)
     ax.set_xlabel('X Position (m)')
     ax.set_ylabel('Y Position (m)')
 

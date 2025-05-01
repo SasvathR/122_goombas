@@ -709,13 +709,10 @@ def simulate_emergency_plots(
 
     return df_sl
 
-
-
-
 def simulate_stoplight_gif(
-    duration      = 10.0,
-    stop_start    = 5.0,
-    stop_duration = 3.0,
+    duration      = 20.0,
+    stop_start    = 3.0,
+    stop_duration = 2.0,
     pa_a3         = 0.01,
     gif_path      = "stoplight_scenario.gif",
     fps           = 10
@@ -726,19 +723,19 @@ def simulate_stoplight_gif(
     print("\n=== Stoplight Scenario (GIF) ===")
     env = simpy.Environment()
     veh_params = [
-        ('V1', -300.0,   0.0,  40.0,   0.0),
-        ('V2', -200.0,   0.0,  30.0,   0.0),
-        ('V3',   0.0, -350.0,   0.0,  60.0),
-        ('V4',   0.0, -250.0,   0.0,  45.0),
+        ('V1', -300.0,   9,  25.0,   0.0, 5, 2),
+        ('V2', -200.0,   9,  20.0,   0.0, 5, 2),
+        ('V3',   16, -200.0,   0.0,  30.0, 2, 5),
+        ('V4',   16, -150.0,   0.0,  40.0, 2, 5),
     ]
-    vehicles = [Vehicle(env, vid, x, y, vx, vy) for vid,x,y,vx,vy in veh_params]
+    vehicles = [Vehicle(env, vid, x, y, vx, vy, l = l, w = w) for vid,x,y,vx,vy,l,w  in veh_params]
     original_vels = {v.id: v.velocity.copy() for v in vehicles}
     mac = MACSim(env, vehicles, pa_a3=pa_a3)
 
     def control(env):
-        yield env.timeout(stop_start)
+        yield env.timeout(0.5)
         red_end = stop_start + stop_duration
-        while env.now < red_end:
+        while env.now < red_end or env.now > 10:
             for v in vehicles:
                 if (v.velocity[0]>0 and v.position[0]>=0) or \
                    (v.velocity[1]>0 and v.position[1]>=0):
@@ -746,6 +743,7 @@ def simulate_stoplight_gif(
             yield env.timeout(0.05)
         for v in vehicles:
             v.velocity[:] = original_vels[v.id]
+
     env.process(control(env))
 
     # run sim
