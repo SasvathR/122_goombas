@@ -1,4 +1,3 @@
-
 import numpy as np
 import random
 import pandas as pd
@@ -41,7 +40,7 @@ B     = 10e6           # DSRC channel bandwidth [Hz]
 nf_dB = 5.0
 noise_var = k_B*T0*B * (10**(nf_dB/10))   # total noise power in 10 MHz
 
-Ptx_dBm = 25.0                          # choose your module’s typical output
+Ptx_dBm = 10.0                          # choose your module’s typical output
 Ptx_W   = 10**((Ptx_dBm-30)/10)         # convert dBm→watts
 
 # precompute FSPL at d0
@@ -590,14 +589,6 @@ class MACSim:
                 # 3) Apply path loss and fading
                 clean_sig = np.sqrt(pl_lin) * h * tx_sig
 
-                # # instantaneous Rx power (Watts)
-                # Prx_lin = np.mean(np.abs(clean_sig)**2)
-
-                # # convert to dBm
-                # Prx_dBm = 10*np.log10(Prx_lin) + 30
-                # noise_dBm = 10*np.log10(noise_var) + 30
-                # # print(f"  → Prx = {Prx_dBm:.1f} dBm, noise = {noise_dBm:.1f} dBm, SNR ≈ {Prx_dBm - noise_dBm:.1f} dB")
-
 
                 rx_sig = add_awgn_integrated(clean_sig)
                 rx_sig = phy.add_phase_noise(rx_sig, phase_noise_default)
@@ -605,42 +596,43 @@ class MACSim:
                 # quantization only degrades at like 4 or 2 bits
                 rx_sig = phy.add_quantization_noise(rx_sig, 12)
 
-                rx_syms = phy.ofdm_receiver(rx_sig, self.Nfft, self.Ncp)
-                rx_eq = rx_syms / h
-                # 6) Demod & count bit errors
-                rx_idx = self.qam_demod(rx_eq)
-                rx_bits = ((rx_idx[:, None] >> np.arange(self.bits_per_symbol - 1, -1, -1)) & 1).astype(int).reshape(-1)
-
+                # 5) equalize each subcarrier by the known flat‐fading h
                 # ─── frequency‐domain snapshots ───────────────────────
                 rxFFT    = phy.ofdm_receiver(rx_sig,    self.Nfft, self.Ncp)
                 cleanFFT = phy.ofdm_receiver(clean_sig, self.Nfft, self.Ncp)
 
-                # 4) compute per‐subcarrier SNR if you want
-                noiseFFT    = rxFFT - cleanFFT
-                snr_sub_lin = np.abs(cleanFFT)**2 / (np.abs(noiseFFT)**2 + 1e-12)
-                snr_sub_db  = 10*np.log10(snr_sub_lin)
-                per_symbol_avg_snr.append(np.mean(snr_sub_db))
-
                 # ─── rest of RX chain ─────────────────────────────────
-                # 5) equalize each subcarrier by the known flat‐fading h
-                rx_eq = rxFFT / h
+                
+                # 6) equalize the *noisy* FFT by known channel
+                rx_eq = rxFFT / (h * np.sqrt(pl_lin)/np.sqrt(self.Nfft))
 
-                # ——— record the first‐symbol constellation for plotting ———
+                # # clean_eq = cleanFFT / h
+                # clean_eq    = cleanFFT / h            # = √pl_lin × mod_syms
+                # ideal_syms  = clean_eq / np.sqrt(pl_lin)  # = mod_syms
+
+                # 7) record the very first symbol’s constellation **after** all impairments
                 if k == 0:
                     first_tx_syms = mod_syms.copy()
                     first_rx_syms = rx_eq.copy()
 
-                # 6) QAM demodulate back to integer symbols
-                rx_idx = self.qam_demod(rx_eq)
+                # if k == 0:
+                #     first_tx_syms = ideal_syms.copy()
+                #     first_rx_syms = rx_eq.copy()
 
-                # 7) unpack bits from each symbol
-                rx_bits = ((rx_idx[:,None] >> 
-                           np.arange(self.bits_per_symbol-1, -1, -1)) 
-                           & 1).astype(int).reshape(-1)
-
-                # 8) (optional) convolutional decode
+                # 8) demodulate & BER count
+                rx_idx  = self.qam_demod(rx_eq)
+                rx_bits = ((rx_idx[:,None] >> np.arange(self.bits_per_symbol-1, -1, -1)) 
+                        & 1).astype(int).reshape(-1)
                 if self.do_conv:
                     rx_bits = self.coder.decode(rx_bits, msg_len=required_len)
+                errs     = np.sum(data_bin != rx_bits)
+                total_err += errs
+                total_bits+= required_len
+
+                # 9) (optional) symbol‐by‐symbol SNR logging
+                noiseFFT    = rxFFT - cleanFFT
+                snr_sub_lin = np.abs(cleanFFT)**2 / (np.abs(noiseFFT)**2 + 1e-12)
+                per_symbol_avg_snr.append(np.mean(10*np.log10(snr_sub_lin)))
 
                 all_bits += [int(b) for b in rx_bits]
 

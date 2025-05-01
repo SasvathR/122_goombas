@@ -154,8 +154,8 @@ def simulate_stoplight_constellation(
 
     # define initial vehicle parameters
     veh_params = [
-        ('V1', -200.0,   0.0,  10.0,  0.0),   # id, x, y, vx, vy
-        ('V2',   0.0, -200.0,   0.0, 10.0),
+        ('V1', -200.0,   0.0,  40.0,  0.0),   # id, x, y, vx, vy
+        ('V2',   0.0, -200.0,   0.0, 40.0),
     ]
 
     all_dfs = []
@@ -180,7 +180,7 @@ def simulate_stoplight_constellation(
             yield env.timeout(stop_start)
             print(f"  → RED light at t={stop_start:.1f}s, stopping vehicles")
             for v in vehicles:
-                v.velocity[:] = 0.0
+                v.velocity[:] = 3.0
             yield env.timeout(stop_duration)
             green_t = stop_start + stop_duration
             print(f"  → GREEN light at t={green_t:.1f}s, resuming")
@@ -198,7 +198,7 @@ def simulate_stoplight_constellation(
 
     # 6) MAC-level diagnostics (use the first PA run for trajectories/BER/SNR)
     mac0 = macs[0]
-    plot_vehicles_gif(env, vehicles)
+    plot_vehicles_enriched(vehicles)
     subset0 = df_all[df_all['pa_a3'] == pa_values[0]]
     mac0.plot_ber_vs_time(subset0)
     mac0.plot_snr_vs_time(subset0)
